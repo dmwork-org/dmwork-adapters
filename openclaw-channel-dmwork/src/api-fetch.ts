@@ -183,7 +183,7 @@ export async function getChannelMessages(params: {
     return (data.messages ?? data ?? []).map((m: any) => ({
       from_uid: m.from_uid ?? m.sender_id ?? "unknown",
       content: m.payload?.content ?? m.content ?? "",
-      timestamp: m.timestamp ?? Date.now(),
+      timestamp: m.timestamp ?? Math.floor(Date.now() / 1000),  // API timestamps are in seconds
     }));
   } catch (err) {
     console.log(`[dmwork] getChannelMessages error: ${err}`);

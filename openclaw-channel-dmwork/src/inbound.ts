@@ -138,16 +138,17 @@ export async function handleInboundMessage(params: {
     if (entries.length === 0 && account.config.botToken) {
       log?.info?.(`dmwork: [MENTION] 内存缓存为空，尝试从API获取历史...`);
       try {
+        const fetchLimit = Math.min(historyLimit, 100);  // Cap at 100
         const apiMessages = await getChannelMessages({
           apiUrl: account.config.apiUrl,
           botToken: account.config.botToken,
           channelId: message.channel_id!,
           channelType: ChannelType.Group,
-          limit: 10,
+          limit: fetchLimit,
         });
         entries = apiMessages
           .filter((m: any) => m.from_uid !== botUid && m.content && !m.content.includes(`@${botUid}`))
-          .slice(-10)
+          .slice(-historyLimit)
           .map((m: any) => ({
             sender: m.from_uid,
             body: m.content,
@@ -221,13 +222,6 @@ export async function handleInboundMessage(params: {
 
   const finalBody = (historyPrefix || quotePrefix) ? (historyPrefix + quotePrefix + rawBody) : rawBody;
 
-  // DEBUG: 检查 finalBody 是否包含历史
-  log?.info?.(`dmwork: [DEBUG] historyPrefix长度=${historyPrefix.length} | quotePrefix长度=${quotePrefix.length} | rawBody长度=${rawBody.length}`);
-  log?.info?.(`dmwork: [DEBUG] finalBody长度=${finalBody.length} | 包含历史=${finalBody.includes('群聊历史记录')}`);
-  if (historyPrefix) {
-    log?.info?.(`dmwork: [DEBUG] historyPrefix前200字: ${historyPrefix.substring(0, 200)}`);
-  }
-
   const body = core.channel.reply.formatAgentEnvelope({
     channel: "DMWork",
     from: fromLabel,
@@ -236,10 +230,6 @@ export async function handleInboundMessage(params: {
     envelope: envelopeOptions,
     body: finalBody,
   });
-
-  // DEBUG: 检查 formatAgentEnvelope 输出
-  log?.info?.(`dmwork: [DEBUG] body长度=${body.length} | 包含历史=${body.includes('群聊历史记录')}`);
-  log?.info?.(`dmwork: [DEBUG] body前300字: ${body.substring(0, 300)}`);
 
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
@@ -261,10 +251,6 @@ export async function handleInboundMessage(params: {
     OriginatingChannel: "dmwork",
     OriginatingTo: `dmwork:${sessionId}`,
   });
-
-  // DEBUG: 检查 ctxPayload 最终内容
-  log?.info?.(`dmwork: [DEBUG] ctxPayload.Body长度=${ctxPayload.Body?.length ?? 0} | 包含历史=${ctxPayload.Body?.includes('群聊历史记录') ?? false}`);
-  log?.info?.(`dmwork: [DEBUG] ctxPayload.Body前300字: ${ctxPayload.Body?.substring(0, 300) ?? 'undefined'}`);
 
   await core.channel.session.recordInboundSession({
     storePath,
