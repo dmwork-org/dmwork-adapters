@@ -1,5 +1,5 @@
 import type { ChannelLogSink, OpenClawConfig } from "openclaw/plugin-sdk";
-import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages } from "./api-fetch.js";
+import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers } from "./api-fetch.js";
 import type { ResolvedDmworkAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType } from "./types.js";
@@ -51,15 +51,21 @@ function resolveContent(payload: BotMessage["payload"]): string {
   return "";
 }
 
+// Cache expiry time: 1 hour
+const GROUP_CACHE_EXPIRY_MS = 60 * 60 * 1000;
+
 export async function handleInboundMessage(params: {
   account: ResolvedDmworkAccount;
   message: BotMessage;
   botUid: string;
   groupHistories: Map<string, any[]>;
+  memberMap: Map<string, string>;  // displayName -> uid mapping
+  uidToNameMap: Map<string, string>;  // uid -> displayName mapping (reverse)
+  groupCacheTimestamps: Map<string, number>;  // groupId -> lastFetchedAt
   log?: ChannelLogSink;
   statusSink?: DmworkStatusSink;
 }) {
-  const { account, message, botUid, groupHistories, log, statusSink } = params;
+  const { account, message, botUid, groupHistories, memberMap, uidToNameMap, groupCacheTimestamps, log, statusSink } = params;
 
   await ensureSdkLoaded();
 
@@ -96,11 +102,93 @@ export async function handleInboundMessage(params: {
   // --- Mention gating for group messages ---
   const requireMention = account.config.requireMention !== false;
   let historyPrefix = "";
+  
+  // Save original mention uids for reply (exclude bot itself)
+  const originalMentionUids: string[] = (message.payload?.mention?.uids ?? []).filter((uid: string) => uid !== botUid);
+
+  // Helper function to refresh group member cache
+  async function refreshGroupMemberCache(forceRefresh = false): Promise<boolean> {
+    if (!isGroup) return false;
+    
+    const lastFetched = groupCacheTimestamps.get(sessionId) ?? 0;
+    const now = Date.now();
+    const isExpired = (now - lastFetched) > GROUP_CACHE_EXPIRY_MS;
+    
+    if (!forceRefresh && !isExpired && lastFetched > 0) {
+      return false; // Cache is still valid
+    }
+    
+    log?.info?.(`dmwork: [CACHE] ${forceRefresh ? 'Force refreshing' : 'Refreshing expired'} group member cache for ${sessionId}`);
+    
+    try {
+      const members = await getGroupMembers({
+        apiUrl: account.config.apiUrl,
+        botToken: account.config.botToken ?? "",
+        groupNo: sessionId,
+      });
+      
+      if (members.length > 0) {
+        for (const m of members) {
+          if (m.name && m.uid) {
+            memberMap.set(m.name, m.uid);
+            uidToNameMap.set(m.uid, m.name);
+          }
+        }
+        groupCacheTimestamps.set(sessionId, now);
+        log?.info?.(`dmwork: [CACHE] Loaded ${members.length} members, memberMap size: ${memberMap.size}`);
+        return true;
+      } else {
+        log?.warn?.(`dmwork: [CACHE] No members returned for group ${sessionId}`);
+        return false;
+      }
+    } catch (err) {
+      log?.error?.(`dmwork: [CACHE] Failed to fetch group members: ${err}`);
+      return false;
+    }
+  }
+
+  // Refresh group member cache if needed (on first message or after expiry)
+  if (isGroup) {
+    await refreshGroupMemberCache();
+  }
+
+  // Build displayName -> uid mapping from message content + mention.uids
+  // When user sends "@陈皮皮 @托马斯.福 xxx", the @ names in content correspond to mention.uids in order
+  if (isGroup) {
+    const allMentionUids: string[] = message.payload?.mention?.uids ?? [];
+    // Match all @xxx patterns (including Chinese characters and dots)
+    const contentMentions = rawBody.match(/@[\w\u4e00-\u9fa5.]+/g) ?? [];
+    
+    if (contentMentions.length > 0 && allMentionUids.length > 0) {
+      log?.info?.(`dmwork: [MAPPING] content @names: ${JSON.stringify(contentMentions)}, mention.uids: ${JSON.stringify(allMentionUids)}`);
+      
+      // Pair them in order
+      const pairCount = Math.min(contentMentions.length, allMentionUids.length);
+      for (let i = 0; i < pairCount; i++) {
+        const displayName = contentMentions[i].slice(1); // Remove @ prefix
+        const uid = allMentionUids[i];
+        if (displayName && uid) {
+          // Update both mappings
+          if (!memberMap.has(displayName)) {
+            memberMap.set(displayName, uid);
+            log?.info?.(`dmwork: [MAPPING] learned name->uid: "${displayName}" -> "${uid}"`);
+          }
+          if (!uidToNameMap.has(uid)) {
+            uidToNameMap.set(uid, displayName);
+            log?.info?.(`dmwork: [MAPPING] learned uid->name: "${uid}" -> "${displayName}"`);
+          }
+        }
+      }
+    }
+  }
 
   if (isGroup && requireMention) {
     const mentionUids: string[] = message.payload?.mention?.uids ?? [];
     const mentionAll: boolean = message.payload?.mention?.all === true;
     const isMentioned = mentionAll || mentionUids.includes(botUid);
+    
+    // Debug: log received mention info
+    log?.info?.(`dmwork: [RECV] mention payload: uids=${JSON.stringify(mentionUids)}, all=${mentionAll}, botUid=${botUid}, originalMentionUids=${JSON.stringify(originalMentionUids)}`);
 
     if (!isMentioned) {
       // Record as pending history context (manual — avoids SDK format incompatibility)
@@ -130,7 +218,6 @@ export async function handleInboundMessage(params: {
     // Take last N entries (sliding window)
     if (entries.length > historyLimit) {
       entries = entries.slice(-historyLimit);
-      groupHistories.set(sessionId, entries);  // Persist trimmed entries
     }
     const historyCountBefore = entries.length;
     log?.info?.(`dmwork: [MENTION] 收到@消息 | from=${message.from_uid} | 缓存=${historyCountBefore}条 | historyLimit=${historyLimit} | session=${sessionId}`);
@@ -156,7 +243,6 @@ export async function handleInboundMessage(params: {
             body: m.content,
             timestamp: m.timestamp * 1000,
           }));
-        groupHistories.set(sessionId, entries);  // Persist API-fetched entries
         log?.info?.(`dmwork: [MENTION] 从API获取到 ${entries.length} 条历史消息`);
       } catch (err) {
         log?.error?.(`dmwork: [MENTION] 从API获取历史失败: ${err}`);
@@ -299,14 +385,102 @@ export async function handleInboundMessage(params: {
         const content = contentParts.join("\n").trim();
         if (!content) return;
 
+        // Build mentionUids from @mentions in content, using memberMap to resolve displayName -> uid
+        // The order of mentionUids MUST match the order of @xxx in content for correct linking!
+        let replyMentionUids: string[] = [];
+        let finalContent = content;
+        
+        if (isGroup) {
+          // Parse all @mentions from content (support Chinese, English, dots, underscores, hex uids)
+          const contentMentions = content.match(/@[\w\u4e00-\u9fa5.]+/g) ?? [];
+          
+          log?.info?.(`dmwork: [REPLY] content @mentions: ${JSON.stringify(contentMentions)}`);
+          log?.info?.(`dmwork: [REPLY] memberMap size: ${memberMap.size}, uidToNameMap size: ${uidToNameMap.size}`);
+          
+          // Track if we need to retry after cache refresh
+          let unresolvedNames: string[] = [];
+          
+          // Helper to resolve a single mention
+          const resolveMention = (name: string): { uid: string | null; newContent: string } => {
+            // First try memberMap (displayName -> uid)
+            let uid = memberMap.get(name);
+            let newContent = finalContent;
+            
+            if (uid) {
+              log?.info?.(`dmwork: [REPLY] resolved displayName @${name} -> uid ${uid}`);
+              return { uid, newContent };
+            } else if (/^[a-f0-9]{32}$/i.test(name)) {
+              // Looks like a hex uid (32 chars) - try to find display name
+              const displayName = uidToNameMap.get(name);
+              if (displayName) {
+                newContent = newContent.replace(`@${name}`, `@${displayName}`);
+                log?.info?.(`dmwork: [REPLY] replaced uid @${name} -> displayName @${displayName}`);
+                return { uid: name, newContent };
+              } else {
+                log?.warn?.(`dmwork: [REPLY] unknown uid @${name}, no displayName found`);
+                return { uid: name, newContent };
+              }
+            } else if (/^[a-zA-Z0-9_]+$/.test(name)) {
+              // Looks like a uid format (alphanumeric + underscore)
+              const displayName = uidToNameMap.get(name);
+              if (displayName) {
+                newContent = newContent.replace(`@${name}`, `@${displayName}`);
+                log?.info?.(`dmwork: [REPLY] replaced uid @${name} -> displayName @${displayName}`);
+                return { uid: name, newContent };
+              } else {
+                log?.info?.(`dmwork: [REPLY] using @${name} as uid directly`);
+                return { uid: name, newContent };
+              }
+            } else {
+              // Chinese name not found - track for retry
+              return { uid: null, newContent };
+            }
+          };
+          
+          // First pass: try to resolve all mentions
+          for (const mention of contentMentions) {
+            const name = mention.slice(1);
+            const result = resolveMention(name);
+            finalContent = result.newContent;
+            if (result.uid) {
+              replyMentionUids.push(result.uid);
+            } else {
+              unresolvedNames.push(name);
+            }
+          }
+          
+          // If we have unresolved names, try refreshing the cache and retry
+          if (unresolvedNames.length > 0) {
+            log?.info?.(`dmwork: [REPLY] ${unresolvedNames.length} unresolved names, force refreshing cache...`);
+            const refreshed = await refreshGroupMemberCache(true);
+            
+            if (refreshed) {
+              // Retry unresolved names
+              for (const name of unresolvedNames) {
+                const uid = memberMap.get(name);
+                if (uid) {
+                  replyMentionUids.push(uid);
+                  log?.info?.(`dmwork: [REPLY] after refresh: resolved @${name} -> ${uid}`);
+                } else {
+                  log?.warn?.(`dmwork: [REPLY] after refresh: still cannot resolve @${name}`);
+                }
+              }
+            }
+          }
+          
+          if (replyMentionUids.length > 0) {
+            log?.info?.(`dmwork: [REPLY] final mentionUids: ${JSON.stringify(replyMentionUids)}`);
+            log?.info?.(`dmwork: [REPLY] final content: ${finalContent.substring(0, 100)}...`);
+          }
+        }
+
         await sendMessage({
           apiUrl: account.config.apiUrl,
           botToken: account.config.botToken ?? "",
           channelId: replyChannelId,
           channelType: replyChannelType,
-          content,
-          // In group replies, @mention the original sender
-          ...(isGroup ? { mentionUids: [message.from_uid] } : {}),
+          content: finalContent,
+          ...(replyMentionUids.length > 0 ? { mentionUids: replyMentionUids } : {}),
         });
 
         statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
