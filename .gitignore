@@ -1,9 +1,8 @@
 node_modules/
 dist/
-*.js
-*.js.map
-*.d.ts
-!jest.config.js
+src/**/*.js
+src/**/*.js.map
+src/**/*.d.ts
 .env
 .env.*
 *.tgz
