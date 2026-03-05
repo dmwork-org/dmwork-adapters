@@ -7,6 +7,21 @@ import { ChannelType, MessageType } from "./types.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+/** Raw message from /v1/bot/messages/sync API */
+interface ApiSyncMessage {
+  from_uid?: string;
+  payload?: string; // base64-encoded JSON
+  timestamp?: number;
+}
+
+/** Decoded payload from base64 message payload */
+interface ParsedPayload {
+  type?: number;
+  content?: string;
+  url?: string;
+  name?: string;
+}
+
 const DEFAULT_HEADERS = {
   "Content-Type": "application/json",
 };
@@ -242,17 +257,17 @@ export async function getChannelMessages(params: {
     }
 
     const data = await response.json();
-    const messages = data.messages ?? [];
-    return messages.map((m: any) => {
+    const messages: ApiSyncMessage[] = data.messages ?? [];
+    return messages.map((m: ApiSyncMessage) => {
       // payload is base64-encoded JSON string
-      let payload: any = {};
+      let payload: ParsedPayload = {};
       if (m.payload) {
         try {
           const decoded = Buffer.from(m.payload, "base64").toString("utf-8");
-          payload = JSON.parse(decoded);
+          payload = JSON.parse(decoded) as ParsedPayload;
         } catch {
           // If decoding fails, try treating payload as already-parsed object
-          payload = typeof m.payload === "object" ? m.payload : {};
+          payload = typeof m.payload === "object" ? (m.payload as ParsedPayload) : {};
         }
       }
       return {

@@ -9,7 +9,9 @@ import { extractMentionMatches } from "./mention-utils.js";
 
 // Defensive imports — these may not exist in older OpenClaw versions
 // History context managed manually for cross-SDK compatibility
-let clearHistoryEntriesIfEnabled: any;
+// The SDK function signature varies across versions, loaded but currently unused
+// eslint-disable-next-line @typescript-eslint/no-unsafe-function-type
+let clearHistoryEntriesIfEnabled: Function | undefined;
 let DEFAULT_GROUP_HISTORY_LIMIT = 20;
 let _sdkLoaded = false;
 
@@ -38,6 +40,16 @@ export interface HistoryEntryCompat {
   sender: string;
   body: string;
   timestamp: number;
+}
+
+/** Type for messages returned by getChannelMessages API */
+interface ApiChannelMessage {
+  from_uid: string;
+  content: string;
+  timestamp: number;
+  type?: number;
+  url?: string;
+  name?: string;
 }
 
 export type DmworkStatusSink = (patch: {
@@ -202,7 +214,7 @@ export async function handleInboundMessage(params: {
   account: ResolvedDmworkAccount;
   message: BotMessage;
   botUid: string;
-  groupHistories: Map<string, any[]>;
+  groupHistories: Map<string, HistoryEntryCompat[]>;
   memberMap: Map<string, string>;  // displayName -> uid mapping
   uidToNameMap: Map<string, string>;  // uid -> displayName mapping (reverse)
   groupCacheTimestamps: Map<string, number>;  // groupId -> lastFetchedAt
@@ -346,9 +358,9 @@ export async function handleInboundMessage(params: {
           log,
         });
         entries = apiMessages
-          .filter((m: any) => m.from_uid !== botUid && (m.content || m.type !== 1))
+          .filter((m: ApiChannelMessage) => m.from_uid !== botUid && (m.content || m.type !== 1))
           .slice(-historyLimit)
-          .map((m: any) => ({
+          .map((m: ApiChannelMessage) => ({
             sender: m.from_uid,
             body: m.content || resolveApiMessagePlaceholder(m.type, m.name),
             timestamp: m.timestamp,  // Already in ms from getChannelMessages
@@ -361,7 +373,7 @@ export async function handleInboundMessage(params: {
 
     // Build history context manually (JSON format)
     if (entries.length > 0) {
-      const messagesJson = JSON.stringify(entries.map((e: any) => ({
+      const messagesJson = JSON.stringify(entries.map((e: HistoryEntryCompat) => ({
         sender: e.sender,
         body: e.body,
       })), null, 2);

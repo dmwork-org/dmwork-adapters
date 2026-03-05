@@ -21,11 +21,11 @@ type HistoryEntry = { sender: string; body: string; timestamp: number };
 const DEFAULT_GROUP_HISTORY_LIMIT = 20;
 
 // Module-level history storage — survives auto-restarts
-const _historyMaps = new Map<string, Map<string, any[]>>();
-function getOrCreateHistoryMap(accountId: string): Map<string, any[]> {
+const _historyMaps = new Map<string, Map<string, HistoryEntry[]>>();
+function getOrCreateHistoryMap(accountId: string): Map<string, HistoryEntry[]> {
   let m = _historyMaps.get(accountId);
   if (!m) {
-    m = new Map<string, any[]>();
+    m = new Map<string, HistoryEntry[]>();
     _historyMaps.set(accountId, m);
   }
   return m;
