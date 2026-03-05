@@ -250,8 +250,8 @@ export async function getChannelMessages(params: {
         try {
           const decoded = Buffer.from(m.payload, "base64").toString("utf-8");
           payload = JSON.parse(decoded);
-        } catch {
-          // If decoding fails, try treating payload as already-parsed object
+        } catch (decodeErr) {
+          params.log?.info?.(`dmwork: payload decode failed for message from ${m.from_uid ?? "unknown"}: ${decodeErr}`);
           payload = typeof m.payload === "object" ? m.payload : {};
         }
       }
