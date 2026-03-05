@@ -36,7 +36,13 @@ async function postJson<T>(
 
   const text = await response.text();
   if (!text) return undefined;
-  return JSON.parse(text) as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(
+      `DMWork API ${path} returned invalid JSON: ${text.slice(0, 200)}`,
+    );
+  }
 }
 
 export async function sendMessage(params: {
