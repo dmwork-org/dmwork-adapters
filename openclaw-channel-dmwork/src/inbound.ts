@@ -147,10 +147,12 @@ export async function handleInboundMessage(params: {
 
   await ensureSdkLoaded();
 
+  // channel_type can come as number (2) or string ("2") depending on SDK version
+  const channelType = Number(message.channel_type);
   const isGroup =
     typeof message.channel_id === "string" &&
     message.channel_id.length > 0 &&
-    message.channel_type === ChannelType.Group;
+    channelType === ChannelType.Group;
 
   const sessionId = isGroup
     ? message.channel_id!
