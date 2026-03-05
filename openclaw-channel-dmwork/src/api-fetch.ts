@@ -9,6 +9,33 @@ const DEFAULT_HEADERS = {
   "Content-Type": "application/json",
 };
 
+/** Default timeout for GET requests (30 seconds) */
+const DEFAULT_TIMEOUT_MS = 30000;
+
+/**
+ * Creates an AbortSignal that will abort after the specified timeout.
+ * If an existing signal is provided, returns a combined signal that aborts
+ * when either the timeout expires or the existing signal aborts.
+ */
+function createTimeoutSignal(timeoutMs: number, existingSignal?: AbortSignal): AbortSignal {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error("Request timeout")), timeoutMs);
+
+  // Clean up timeout when the controller aborts (either way)
+  controller.signal.addEventListener("abort", () => clearTimeout(timeout), { once: true });
+
+  // If there's an existing signal, abort our controller when it aborts
+  if (existingSignal) {
+    existingSignal.addEventListener("abort", () => controller.abort(existingSignal.reason), { once: true });
+    // If already aborted, abort immediately
+    if (existingSignal.aborted) {
+      controller.abort(existingSignal.reason);
+    }
+  }
+
+  return controller.signal;
+}
+
 async function postJson<T>(
   apiUrl: string,
   botToken: string,
@@ -132,19 +159,31 @@ export async function registerBot(params: {
 export async function fetchBotGroups(params: {
   apiUrl: string;
   botToken: string;
+  timeoutMs?: number;
+  signal?: AbortSignal;
 }): Promise<Array<{ group_no: string; name: string }>> {
   const url = `${params.apiUrl}/v1/bot/groups`;
-  const resp = await fetch(url, {
-    method: "GET",
-    headers: {
-      "Authorization": `Bearer ${params.botToken}`,
-    },
-  });
-  if (!resp.ok) {
-    // Fallback: return empty if API not available
-    return [];
+  const timeoutSignal = createTimeoutSignal(params.timeoutMs ?? DEFAULT_TIMEOUT_MS, params.signal);
+  try {
+    const resp = await fetch(url, {
+      method: "GET",
+      headers: {
+        "Authorization": `Bearer ${params.botToken}`,
+      },
+      signal: timeoutSignal,
+    });
+    if (!resp.ok) {
+      // Fallback: return empty if API not available
+      return [];
+    }
+    return await resp.json();
+  } catch (err) {
+    // Handle timeout and abort errors gracefully
+    if (err instanceof Error && (err.name === "AbortError" || err.message === "Request timeout")) {
+      return [];
+    }
+    throw err;
   }
-  return await resp.json();
 }
 
 /**
@@ -161,17 +200,22 @@ export async function getGroupMembers(params: {
   apiUrl: string;
   botToken: string;
   groupNo: string;  // 群 ID (channel_id)
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void };
 }): Promise<GroupMember[]> {
   const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${params.groupNo}/members`;
+  const timeoutSignal = createTimeoutSignal(params.timeoutMs ?? DEFAULT_TIMEOUT_MS, params.signal);
   try {
     const resp = await fetch(url, {
       method: "GET",
       headers: {
         "Authorization": `Bearer ${params.botToken}`,
       },
+      signal: timeoutSignal,
     });
     if (!resp.ok) {
-      console.log(`[dmwork] getGroupMembers failed: ${resp.status}`);
+      params.log?.info?.(`[dmwork] getGroupMembers failed: ${resp.status}`);
       return [];
     }
     const data = await resp.json();
@@ -183,7 +227,12 @@ export async function getGroupMembers(params: {
         : [];
     return members as GroupMember[];
   } catch (err) {
-    console.log(`[dmwork] getGroupMembers error: ${err}`);
+    // Handle timeout specifically
+    if (err instanceof Error && (err.name === "AbortError" || err.message === "Request timeout")) {
+      params.log?.info?.(`[dmwork] getGroupMembers timeout after ${params.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms`);
+      return [];
+    }
+    params.log?.error?.(`[dmwork] getGroupMembers error: ${err}`);
     return [];
   }
 }
