@@ -625,7 +625,7 @@ export async function handleInboundMessage(params: {
       const messagesJson = JSON.stringify(entries.map((e: any) => ({
         sender: e.sender,
         body: e.body,
-        ...(e.mediaDataUrl ? { mediaDataUrl: e.mediaDataUrl } : {}),
+        ...(e.mediaDataUrl ? { hasMedia: true } : {}),
       })), null, 2);
       const template = account.config.historyPromptTemplate || DEFAULT_HISTORY_PROMPT_TEMPLATE;
       historyPrefix = template
