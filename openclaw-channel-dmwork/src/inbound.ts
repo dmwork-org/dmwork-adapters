@@ -543,7 +543,7 @@ export async function handleInboundMessage(params: {
       entries.push({
         sender: message.from_uid,
         body: rawBody,
-        mediaDataUrl: inboundMediaUrl,
+        mediaDataUrl: inboundMediaUrl?.startsWith("data:") ? inboundMediaUrl : undefined,
         timestamp: message.timestamp ? message.timestamp * 1000 : Date.now(),
       });
       const historyLimit = account.config.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT;
