@@ -655,9 +655,14 @@ export async function handleInboundMessage(params: {
           .filter((m: any) => m.from_uid !== botUid && (m.content || m.type !== 1))
           .slice(-historyLimit);
         entries = filteredApiMsgs.map((m: any) => {
+          let body = m.content || resolveApiMessagePlaceholder(m.type, m.name);
+          // For MultipleForward, expand the nested messages from full payload
+          if (m.type === MessageType.MultipleForward && m.payload) {
+            body = resolveMultipleForwardText(m.payload);
+          }
           const entry: any = {
             sender: m.from_uid,
-            body: m.content || resolveApiMessagePlaceholder(m.type, m.name),
+            body,
             timestamp: m.timestamp,
           };
           // For media message types, resolve the URL directly (storage is public-read)
