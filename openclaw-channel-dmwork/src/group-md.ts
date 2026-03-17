@@ -208,18 +208,16 @@ export async function ensureGroupMd(params: {
   if (_checkedGroups.has(key)) return;
   _checkedGroups.add(key);
 
-  // Check existing disk cache
+  // Check existing disk cache — if local files exist, skip API call
   const existingMeta = readGroupMeta(agentId, accountId, groupNo);
-
-  const apiData = await fetchGroupMdFromApi({ apiUrl, botToken, groupNo, log });
-  if (!apiData) {
-    // No GROUP.md on server — if we had one cached, leave it (might be temporarily unavailable)
+  const existingContent = readGroupMdFromDisk(agentId, accountId, groupNo);
+  if (existingMeta && existingContent !== null) {
+    log?.debug?.(`dmwork: [GROUP.md] local cache exists for ${groupNo} (v${existingMeta.version}), skipping API`);
     return;
   }
 
-  // Skip write if version hasn't changed
-  if (existingMeta && existingMeta.version >= apiData.version) {
-    log?.debug?.(`dmwork: [GROUP.md] version unchanged for ${groupNo} (v${existingMeta.version})`);
+  const apiData = await fetchGroupMdFromApi({ apiUrl, botToken, groupNo, log });
+  if (!apiData) {
     return;
   }
 
