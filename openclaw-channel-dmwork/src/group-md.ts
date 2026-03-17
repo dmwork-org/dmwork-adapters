@@ -1,0 +1,325 @@
+/**
+ * GROUP.md local caching and before_prompt_build hook for dmwork groups.
+ *
+ * Storage layout:
+ *   ~/.openclaw/workspace/{agent}/dmwork/{accountId}/groups/{groupNo}/GROUP.md
+ *   ~/.openclaw/workspace/{agent}/dmwork/{accountId}/groups/{groupNo}/GROUP.meta.json
+ *
+ * Memory maps (rebuilt from inbound messages after restart):
+ *   _groupAccountMap: groupNo → accountId
+ *   _checkedGroups: Set<"accountId/groupNo"> — tracks groups checked this session
+ */
+
+import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
+import type { ChannelLogSink } from "openclaw/plugin-sdk";
+
+export interface GroupMdMeta {
+  version: number;
+  updated_at: string | null;
+  updated_by: string;
+  fetched_at: string;
+  account_id: string;
+}
+
+export interface GroupMdApiResponse {
+  content: string;
+  version: number;
+  updated_at: string | null;
+  updated_by: string;
+}
+
+/** Regex to extract groupNo from OpenClaw sessionKey */
+export const DMWORK_GROUP_RE = /^agent:[^:]+:dmwork:group:(.+)$/;
+
+// --- In-memory maps ---
+
+/** groupNo → accountId (rebuilt from inbound messages) */
+const _groupAccountMap = new Map<string, string>();
+
+/** Set of "accountId/groupNo" that have been checked this session */
+const _checkedGroups = new Set<string>();
+
+// --- Path helpers ---
+
+function workspaceBase(agentId: string): string {
+  return join(homedir(), ".openclaw", "workspace", agentId, "dmwork");
+}
+
+function groupDir(agentId: string, accountId: string, groupNo: string): string {
+  return join(workspaceBase(agentId), accountId, "groups", groupNo);
+}
+
+function groupMdPath(agentId: string, accountId: string, groupNo: string): string {
+  return join(groupDir(agentId, accountId, groupNo), "GROUP.md");
+}
+
+function groupMetaPath(agentId: string, accountId: string, groupNo: string): string {
+  return join(groupDir(agentId, accountId, groupNo), "GROUP.meta.json");
+}
+
+// --- Public API ---
+
+/**
+ * Register the mapping from groupNo to accountId.
+ * Called by inbound.ts on every group message.
+ */
+export function registerGroupAccount(groupNo: string, accountId: string): void {
+  _groupAccountMap.set(groupNo, accountId);
+}
+
+/**
+ * Scan disk for accountId when memory map misses.
+ * Looks through all accountId directories for a matching groupNo with a meta file.
+ */
+export function scanForAccountId(agentId: string, groupNo: string): string | null {
+  const base = workspaceBase(agentId);
+  if (!existsSync(base)) return null;
+
+  let accounts: string[];
+  try {
+    accounts = readdirSync(base, { withFileTypes: true })
+      .filter(d => d.isDirectory())
+      .map(d => d.name);
+  } catch {
+    return null;
+  }
+
+  for (const acct of accounts) {
+    const metaFile = groupMetaPath(agentId, acct, groupNo);
+    if (existsSync(metaFile)) {
+      try {
+        const meta = JSON.parse(readFileSync(metaFile, "utf-8")) as GroupMdMeta;
+        if (meta.account_id) {
+          _groupAccountMap.set(groupNo, meta.account_id);
+          return meta.account_id;
+        }
+      } catch {
+        // corrupted meta, skip
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Resolve accountId for a group — memory first, then disk scan.
+ */
+function resolveAccountId(agentId: string, groupNo: string): string | null {
+  return _groupAccountMap.get(groupNo) ?? scanForAccountId(agentId, groupNo);
+}
+
+/**
+ * Fetch GROUP.md from the API.
+ */
+async function fetchGroupMdFromApi(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  log?: ChannelLogSink;
+}): Promise<GroupMdApiResponse | null> {
+  const { apiUrl, botToken, groupNo, log } = params;
+  const url = `${apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${encodeURIComponent(groupNo)}/md`;
+  try {
+    const resp = await fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${botToken}` },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (resp.status === 404) {
+      log?.debug?.(`dmwork: [GROUP.md] no GROUP.md for group ${groupNo}`);
+      return null;
+    }
+    if (!resp.ok) {
+      log?.warn?.(`dmwork: [GROUP.md] fetch failed for ${groupNo}: ${resp.status}`);
+      return null;
+    }
+    return (await resp.json()) as GroupMdApiResponse;
+  } catch (err) {
+    log?.warn?.(`dmwork: [GROUP.md] fetch error for ${groupNo}: ${String(err)}`);
+    return null;
+  }
+}
+
+/**
+ * Write GROUP.md and meta to disk.
+ */
+export function writeGroupMdToDisk(params: {
+  agentId: string;
+  accountId: string;
+  groupNo: string;
+  content: string;
+  meta: GroupMdMeta;
+}): void {
+  const dir = groupDir(params.agentId, params.accountId, params.groupNo);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(groupMdPath(params.agentId, params.accountId, params.groupNo), params.content, "utf-8");
+  writeFileSync(groupMetaPath(params.agentId, params.accountId, params.groupNo), JSON.stringify(params.meta, null, 2), "utf-8");
+}
+
+/**
+ * Read GROUP.md from disk. Returns null if file doesn't exist.
+ */
+export function readGroupMdFromDisk(agentId: string, accountId: string, groupNo: string): string | null {
+  const filePath = groupMdPath(agentId, accountId, groupNo);
+  try {
+    return readFileSync(filePath, "utf-8");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read GROUP.meta.json from disk. Returns null if file doesn't exist.
+ */
+export function readGroupMeta(agentId: string, accountId: string, groupNo: string): GroupMdMeta | null {
+  const metaFile = groupMetaPath(agentId, accountId, groupNo);
+  try {
+    return JSON.parse(readFileSync(metaFile, "utf-8")) as GroupMdMeta;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Delete GROUP.md and meta from disk.
+ */
+export function deleteGroupMdFromDisk(agentId: string, accountId: string, groupNo: string): void {
+  try { unlinkSync(groupMdPath(agentId, accountId, groupNo)); } catch { /* ok */ }
+  try { unlinkSync(groupMetaPath(agentId, accountId, groupNo)); } catch { /* ok */ }
+}
+
+/**
+ * Ensure GROUP.md is fetched and cached for a group.
+ * Called by inbound.ts on group messages (fire-and-forget).
+ * Only fetches once per session per group (tracked by _checkedGroups).
+ */
+export async function ensureGroupMd(params: {
+  agentId: string;
+  accountId: string;
+  groupNo: string;
+  apiUrl: string;
+  botToken: string;
+  log?: ChannelLogSink;
+}): Promise<void> {
+  const { agentId, accountId, groupNo, apiUrl, botToken, log } = params;
+  const key = `${accountId}/${groupNo}`;
+  if (_checkedGroups.has(key)) return;
+  _checkedGroups.add(key);
+
+  // Check existing disk cache
+  const existingMeta = readGroupMeta(agentId, accountId, groupNo);
+
+  const apiData = await fetchGroupMdFromApi({ apiUrl, botToken, groupNo, log });
+  if (!apiData) {
+    // No GROUP.md on server — if we had one cached, leave it (might be temporarily unavailable)
+    return;
+  }
+
+  // Skip write if version hasn't changed
+  if (existingMeta && existingMeta.version >= apiData.version) {
+    log?.debug?.(`dmwork: [GROUP.md] version unchanged for ${groupNo} (v${existingMeta.version})`);
+    return;
+  }
+
+  const meta: GroupMdMeta = {
+    version: apiData.version,
+    updated_at: apiData.updated_at,
+    updated_by: apiData.updated_by,
+    fetched_at: new Date().toISOString(),
+    account_id: accountId,
+  };
+
+  writeGroupMdToDisk({ agentId, accountId, groupNo, content: apiData.content, meta });
+  log?.info?.(`dmwork: [GROUP.md] cached v${apiData.version} for group ${groupNo}`);
+}
+
+/**
+ * Handle group_md_updated / group_md_deleted events.
+ * Called by inbound.ts when a structured event message is received.
+ */
+export async function handleGroupMdEvent(params: {
+  agentId: string;
+  accountId: string;
+  groupNo: string;
+  eventType: string;
+  apiUrl: string;
+  botToken: string;
+  log?: ChannelLogSink;
+}): Promise<void> {
+  const { agentId, accountId, groupNo, eventType, apiUrl, botToken, log } = params;
+
+  if (eventType === "group_md_deleted") {
+    deleteGroupMdFromDisk(agentId, accountId, groupNo);
+    clearGroupMdChecked(accountId, groupNo);
+    log?.info?.(`dmwork: [GROUP.md] deleted cache for group ${groupNo}`);
+    return;
+  }
+
+  if (eventType === "group_md_updated") {
+    // Force re-fetch
+    clearGroupMdChecked(accountId, groupNo);
+    const apiData = await fetchGroupMdFromApi({ apiUrl, botToken, groupNo, log });
+    if (!apiData) {
+      log?.warn?.(`dmwork: [GROUP.md] update event but fetch returned null for ${groupNo}`);
+      return;
+    }
+
+    const meta: GroupMdMeta = {
+      version: apiData.version,
+      updated_at: apiData.updated_at,
+      updated_by: apiData.updated_by,
+      fetched_at: new Date().toISOString(),
+      account_id: accountId,
+    };
+
+    writeGroupMdToDisk({ agentId, accountId, groupNo, content: apiData.content, meta });
+    _checkedGroups.add(`${accountId}/${groupNo}`);
+    log?.info?.(`dmwork: [GROUP.md] updated cache to v${apiData.version} for group ${groupNo}`);
+  }
+}
+
+/**
+ * Get GROUP.md content for prompt injection.
+ * Called by the before_prompt_build hook.
+ * Only does disk reads — no network calls.
+ */
+export function getGroupMdForPrompt(ctx: {
+  sessionKey?: string;
+  agentId?: string;
+}): string | null {
+  const { sessionKey, agentId } = ctx;
+  if (!sessionKey || !agentId) return null;
+
+  const match = DMWORK_GROUP_RE.exec(sessionKey);
+  if (!match) return null;
+  const groupNo = match[1];
+
+  const accountId = resolveAccountId(agentId, groupNo);
+  if (!accountId) return null;
+
+  return readGroupMdFromDisk(agentId, accountId, groupNo);
+}
+
+/**
+ * Clear the checked flag for a group, forcing re-fetch on next encounter.
+ */
+export function clearGroupMdChecked(accountId: string, groupNo: string): void {
+  _checkedGroups.delete(`${accountId}/${groupNo}`);
+}
+
+// --- Test helpers (exported for unit tests) ---
+
+export function _testGetGroupAccountMap(): Map<string, string> {
+  return _groupAccountMap;
+}
+
+export function _testGetCheckedGroups(): Set<string> {
+  return _checkedGroups;
+}
+
+export function _testReset(): void {
+  _groupAccountMap.clear();
+  _checkedGroups.clear();
+}

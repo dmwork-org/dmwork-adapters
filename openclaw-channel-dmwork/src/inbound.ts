@@ -6,6 +6,7 @@ import { ChannelType, MessageType } from "./types.js";
 import { getDmworkRuntime } from "./runtime.js";
 import { DEFAULT_HISTORY_PROMPT_TEMPLATE } from "./config-schema.js";
 import { extractMentionMatches } from "./mention-utils.js";
+import { registerGroupAccount, ensureGroupMd, handleGroupMdEvent } from "./group-md.js";
 
 // Defensive imports — these may not exist in older OpenClaw versions
 // History context managed manually for cross-SDK compatibility
@@ -485,6 +486,40 @@ export async function handleInboundMessage(params: {
     message.channel_id.length > 0 &&
     message.channel_type === ChannelType.Group;
 
+  // --- GROUP.md: register group→account mapping and handle structured events ---
+  if (isGroup && message.channel_id) {
+    registerGroupAccount(message.channel_id, account.accountId);
+
+    // Check for structured event messages (group_md_updated / group_md_deleted)
+    const eventType = message.payload?.event?.type;
+    if (eventType === "group_md_updated" || eventType === "group_md_deleted") {
+      // Resolve agentId for disk path
+      const core = getDmworkRuntime();
+      const cfg = core.config.loadConfig() as OpenClawConfig;
+      try {
+        const route = core.channel.routing.resolveAgentRoute({
+          cfg,
+          channel: "dmwork",
+          accountId: account.accountId,
+          peer: { kind: "group", id: message.channel_id },
+        });
+        await handleGroupMdEvent({
+          agentId: route.agentId,
+          accountId: account.accountId,
+          groupNo: message.channel_id,
+          eventType,
+          apiUrl: account.config.apiUrl,
+          botToken: account.config.botToken ?? "",
+          log,
+        });
+      } catch (err) {
+        log?.warn?.(`dmwork: [GROUP.md] event handling failed: ${String(err)}`);
+      }
+      // Don't forward event messages to AI
+      return;
+    }
+  }
+
   // Parse space_id from channel_id (format: s{spaceId}_{peerId})
   // For DM, channel_id is a fake channel: s{spaceId}_{uid1}@s{spaceId}_{uid2}
   // Use LastIndex approach: spaceId is everything between 's' and the last '_' before peerId
@@ -734,6 +769,18 @@ export async function handleInboundMessage(params: {
   } catch (routeErr) {
     log?.error?.(`dmwork: resolveAgentRoute failed: ${String(routeErr)}`);
     return;
+  }
+
+  // Fire-and-forget: ensure GROUP.md is cached for this group
+  if (isGroup && message.channel_id) {
+    ensureGroupMd({
+      agentId: route.agentId,
+      accountId: account.accountId,
+      groupNo: message.channel_id,
+      apiUrl: account.config.apiUrl,
+      botToken: account.config.botToken ?? "",
+      log,
+    }).catch((err) => log?.warn?.(`dmwork: [GROUP.md] ensureGroupMd failed: ${String(err)}`));
   }
 
   const fromLabel = isGroup
