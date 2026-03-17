@@ -23,13 +23,12 @@ const plugin: {
     setDmworkRuntime(api.runtime);
     api.registerChannel({ plugin: dmworkPlugin });
 
+    // Note: using prependContext as current SDK lacks appendSystemContext.
+    // TODO: upgrade openclaw SDK and switch to appendSystemContext for prompt caching.
     api.on('before_prompt_build', (_event, ctx) => {
       const content = getGroupMdForPrompt(ctx);
-      if (content) {
-        return {
-          appendSystemContext: `[GROUP CONTEXT]\n${content}\n[/GROUP CONTEXT]`,
-        };
-      }
+      if (!content) return;
+      return { prependContext: `[GROUP CONTEXT]\n${content}\n[/GROUP CONTEXT]` };
     });
   },
 };
