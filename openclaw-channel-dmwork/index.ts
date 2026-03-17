@@ -27,7 +27,7 @@ const plugin: {
       const content = getGroupMdForPrompt(ctx);
       if (content) {
         return {
-          prependContext: `[GROUP CONTEXT]\n${content}\n[/GROUP CONTEXT]`,
+          appendSystemContext: `[GROUP CONTEXT]\n${content}\n[/GROUP CONTEXT]`,
         };
       }
     });
