@@ -477,15 +477,18 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         token: credentials.im_token,
 
         onMessage: (msg: BotMessage) => {
-          // Skip self messages
-          if (msg.from_uid === credentials.robot_id) return;
+          // Allow structured event messages (e.g. group_md_updated) even from self/bots
+          const isEvent = !!(msg.payload as any)?.event?.type;
+          // Skip self messages (but not events — bot needs to know about its own GROUP.md updates)
+          if (msg.from_uid === credentials.robot_id && !isEvent) return;
           // Skip messages from any other bot in this plugin instance (prevent bot-to-bot loops)
           // But allow group messages through — bot-to-bot @mention in groups is legitimate;
           // mention gating in inbound.ts ensures only @-targeted messages trigger AI.
-          if (_knownBotUids.has(msg.from_uid) && msg.channel_type === ChannelType.DM) return;
-          // Skip unsupported message types (Location, Card)
+          // Also allow event messages (e.g. group_md_updated) from any source.
+          if (_knownBotUids.has(msg.from_uid) && msg.channel_type === ChannelType.DM && !isEvent) return;
+          // Skip unsupported message types (Location, Card), but allow event messages through
           const supportedTypes = [MessageType.Text, MessageType.Image, MessageType.GIF, MessageType.Voice, MessageType.Video, MessageType.File, MessageType.MultipleForward];
-          if (!msg.payload || !supportedTypes.includes(msg.payload.type)) return;
+          if (!msg.payload || (!supportedTypes.includes(msg.payload.type) && !isEvent)) return;
 
           // Defense-in-depth DM filter (kept for safety, though v0.2.28+ uses independent
           // WebSocket connections per bot so server-side routing is already correct).

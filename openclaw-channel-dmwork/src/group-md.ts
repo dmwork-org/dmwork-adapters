@@ -6,7 +6,7 @@
  *   ~/.openclaw/workspace/{agent}/dmwork/{accountId}/groups/{groupNo}/GROUP.meta.json
  *
  * Memory maps (rebuilt from inbound messages after restart):
- *   _groupAccountMap: groupNo → accountId
+ *   _groupAccountMap: "agentId:groupNo" → accountId
  *   _checkedGroups: Set<"accountId/groupNo"> — tracks groups checked this session
  */
 
@@ -65,8 +65,9 @@ function groupMetaPath(agentId: string, accountId: string, groupNo: string): str
  * Register the mapping from groupNo to accountId.
  * Called by inbound.ts on every group message.
  */
-export function registerGroupAccount(groupNo: string, accountId: string): void {
-  _groupAccountMap.set(groupNo, accountId);
+export function registerGroupAccount(groupNo: string, accountId: string, agentId?: string): void {
+  const key = agentId ? `${agentId}:${groupNo}` : groupNo;
+  _groupAccountMap.set(key, accountId);
 }
 
 /**
@@ -92,7 +93,7 @@ export function scanForAccountId(agentId: string, groupNo: string): string | nul
       try {
         const meta = JSON.parse(readFileSync(metaFile, "utf-8")) as GroupMdMeta;
         if (meta.account_id) {
-          _groupAccountMap.set(groupNo, meta.account_id);
+          _groupAccountMap.set(`${agentId}:${groupNo}`, meta.account_id);
           return meta.account_id;
         }
       } catch {
@@ -107,7 +108,7 @@ export function scanForAccountId(agentId: string, groupNo: string): string | nul
  * Resolve accountId for a group — memory first, then disk scan.
  */
 function resolveAccountId(agentId: string, groupNo: string): string | null {
-  return _groupAccountMap.get(groupNo) ?? scanForAccountId(agentId, groupNo);
+  return _groupAccountMap.get(`${agentId}:${groupNo}`) ?? _groupAccountMap.get(groupNo) ?? scanForAccountId(agentId, groupNo);
 }
 
 /**
@@ -208,16 +209,16 @@ export async function ensureGroupMd(params: {
   if (_checkedGroups.has(key)) return;
   _checkedGroups.add(key);
 
-  // Check existing disk cache — if local files exist, skip API call
-  const existingMeta = readGroupMeta(agentId, accountId, groupNo);
-  const existingContent = readGroupMdFromDisk(agentId, accountId, groupNo);
-  if (existingMeta && existingContent !== null) {
-    log?.debug?.(`dmwork: [GROUP.md] local cache exists for ${groupNo} (v${existingMeta.version}), skipping API`);
+  // Always fetch from API on startup to ensure cache is fresh
+  const apiData = await fetchGroupMdFromApi({ apiUrl, botToken, groupNo, log });
+  if (!apiData) {
     return;
   }
 
-  const apiData = await fetchGroupMdFromApi({ apiUrl, botToken, groupNo, log });
-  if (!apiData) {
+  // Compare with local cache — skip disk write if version unchanged
+  const existingMeta = readGroupMeta(agentId, accountId, groupNo);
+  if (existingMeta && existingMeta.version === apiData.version) {
+    log?.debug?.(`dmwork: [GROUP.md] cache up-to-date for ${groupNo} (v${apiData.version})`);
     return;
   }
 
@@ -297,7 +298,8 @@ export function getGroupMdForPrompt(ctx: {
   const accountId = resolveAccountId(agentId, groupNo);
   if (!accountId) return null;
 
-  return readGroupMdFromDisk(agentId, accountId, groupNo);
+  const content = readGroupMdFromDisk(agentId, accountId, groupNo);
+  return content;
 }
 
 /**

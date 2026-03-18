@@ -488,7 +488,18 @@ export async function handleInboundMessage(params: {
 
   // --- GROUP.md: register group→account mapping and handle structured events ---
   if (isGroup && message.channel_id) {
-    registerGroupAccount(message.channel_id, account.accountId);
+    // Resolve agentId for the group→account mapping
+    try {
+      const _core = getDmworkRuntime();
+      const _cfg = _core.config.loadConfig() as OpenClawConfig;
+      const _route = _core.channel.routing.resolveAgentRoute({
+        config: _cfg, provider: "dmwork", accountId: account.accountId,
+        channelType: "group", peerId: message.channel_id,
+      });
+      registerGroupAccount(message.channel_id, account.accountId, _route?.agentId);
+    } catch {
+      registerGroupAccount(message.channel_id, account.accountId);
+    }
 
     // Check for structured event messages (group_md_updated / group_md_deleted)
     const eventType = message.payload?.event?.type;
