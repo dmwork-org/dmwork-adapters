@@ -3,7 +3,7 @@ import {
   type ChannelOutboundContext,
   type ChannelPlugin,
 } from "openclaw/plugin-sdk";
-import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import type { OpenClawConfig, ChannelMessageActionAdapter } from "openclaw/plugin-sdk";
 import { DmworkConfigJsonSchema } from "./config-schema.js";
 import {
   listDmworkAccountIds,
@@ -16,6 +16,7 @@ import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
 import { parseMentions } from "./mention-utils.js";
+import { handleDmworkMessageAction } from "./actions.js";
 import path from "path";
 import os from "os";
 import { mkdir, readFile, writeFile } from "fs/promises";
@@ -37,7 +38,7 @@ function getOrCreateHistoryMap(accountId: string): Map<string, any[]> {
 // Module-level member mapping: displayName -> uid
 // Used to resolve @mentions in AI replies
 const _memberMaps = new Map<string, Map<string, string>>();
-function getOrCreateMemberMap(accountId: string): Map<string, string> {
+export function getOrCreateMemberMap(accountId: string): Map<string, string> {
   let m = _memberMaps.get(accountId);
   if (!m) {
     m = new Map<string, string>();
@@ -49,7 +50,7 @@ function getOrCreateMemberMap(accountId: string): Map<string, string> {
 // Module-level reverse mapping: uid -> displayName
 // Used to show display names instead of uids in replies
 const _uidToNameMaps = new Map<string, Map<string, string>>();
-function getOrCreateUidToNameMap(accountId: string): Map<string, string> {
+export function getOrCreateUidToNameMap(accountId: string): Map<string, string> {
   let m = _uidToNameMaps.get(accountId);
   if (!m) {
     m = new Map<string, string>();
@@ -164,6 +165,46 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
     threads: false,
   },
   reload: { configPrefixes: ["channels.dmwork"] },
+  actions: {
+    listActions: ({ cfg }: { cfg: any }) => {
+      try {
+        const ids = listDmworkAccountIds(cfg);
+        const hasConfigured = ids.some((id) => {
+          const acct = resolveDmworkAccount({ cfg, accountId: id });
+          return acct.enabled && acct.configured && !!acct.config.botToken;
+        });
+        if (!hasConfigured) return [];
+      } catch {
+        return [];
+      }
+      return ["send", "read", "member-info", "channel-list", "channel-info"];
+    },
+    extractToolSend: ({ args }: { args: Record<string, unknown> }) => {
+      const target = args.target as string | undefined;
+      return target ? { target } : {};
+    },
+    handleAction: async (ctx: any) => {
+      const accountId = ctx.accountId ?? DEFAULT_ACCOUNT_ID;
+      const account = resolveDmworkAccount({
+        cfg: ctx.cfg,
+        accountId,
+      });
+      if (!account.config.botToken) {
+        return { ok: false, error: "DMWork botToken is not configured" };
+      }
+      const memberMap = getOrCreateMemberMap(accountId);
+      const uidToNameMap = getOrCreateUidToNameMap(accountId);
+      return handleDmworkMessageAction({
+        action: ctx.action,
+        args: ctx.args ?? {},
+        apiUrl: account.config.apiUrl,
+        botToken: account.config.botToken,
+        memberMap,
+        uidToNameMap,
+        log: ctx.log,
+      });
+    },
+  } as any,
   configSchema: DmworkConfigJsonSchema,
   config: {
     listAccountIds: (cfg) => listDmworkAccountIds(cfg),

@@ -66,7 +66,7 @@ function extractFilename(url: string): string {
 }
 
 /** Upload media to MinIO and send as image/file message */
-async function uploadAndSendMedia(params: {
+export async function uploadAndSendMedia(params: {
   mediaUrl: string;
   apiUrl: string;
   botToken: string;

@@ -302,6 +302,35 @@ export async function getGroupMembers(params: {
 }
 
 /**
+ * 获取群信息
+ */
+export async function getGroupInfo(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  log?: { info?: (msg: string) => void; error?: (msg: string) => void };
+}): Promise<{ group_no: string; name: string; [key: string]: unknown }> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${params.groupNo}`;
+  try {
+    const resp = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${params.botToken}`,
+      },
+      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      params.log?.error?.(`dmwork: getGroupInfo failed: ${resp.status}`);
+      throw new Error(`getGroupInfo failed: ${resp.status}`);
+    }
+    return await resp.json();
+  } catch (err) {
+    params.log?.error?.(`dmwork: getGroupInfo error: ${err}`);
+    throw err;
+  }
+}
+
+/**
  * 获取频道历史消息（用于注入上下文）
  * @param params.log - Optional logger for consistent logging with OpenClaw log system
  */
