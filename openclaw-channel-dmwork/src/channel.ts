@@ -11,7 +11,7 @@ import {
   resolveDmworkAccount,
   type ResolvedDmworkAccount,
 } from "./accounts.js";
-import { registerBot, sendMessage, sendHeartbeat, uploadFile, sendMediaMessage, inferContentType } from "./api-fetch.js";
+import { registerBot, sendMessage, sendHeartbeat, uploadFile, sendMediaMessage, inferContentType, fetchBotGroups, getGroupMd } from "./api-fetch.js";
 import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
@@ -70,6 +70,17 @@ function getOrCreateGroupCacheTimestamps(accountId: string): Map<string, number>
   return m;
 }
 
+
+// Module-level GROUP.md cache: accountId -> (groupNo -> { content, version })
+const _groupMdCache = new Map<string, Map<string, { content: string; version: number }>>();
+export function getOrCreateGroupMdCache(accountId: string): Map<string, { content: string; version: number }> {
+  let m = _groupMdCache.get(accountId);
+  if (!m) {
+    m = new Map<string, { content: string; version: number }>();
+    _groupMdCache.set(accountId, m);
+  }
+  return m;
+}
 
 // --- Cache cleanup: evict groups inactive for >4 hours ---
 const CACHE_MAX_AGE_MS = 4 * 60 * 60 * 1000;
@@ -177,7 +188,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       } catch {
         return [];
       }
-      return ["send", "read", "member-info", "channel-list", "channel-info"];
+      return ["send", "read", "member-info", "channel-list", "channel-info", "group-md-read", "group-md-update"] as any;
     },
     extractToolSend: ({ args }: { args: Record<string, unknown> }) => {
       const target = args.target as string | undefined;
@@ -194,6 +205,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       }
       const memberMap = getOrCreateMemberMap(accountId);
       const uidToNameMap = getOrCreateUidToNameMap(accountId);
+      const groupMdCache = getOrCreateGroupMdCache(accountId);
       return handleDmworkMessageAction({
         action: ctx.action,
         args: ctx.args ?? {},
@@ -201,6 +213,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         botToken: account.config.botToken,
         memberMap,
         uidToNameMap,
+        groupMdCache,
         log: ctx.log,
       });
     },
@@ -455,6 +468,29 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       // Check for updates in background (fire-and-forget)
       checkForUpdates(account.config.apiUrl, log).catch(() => {});
 
+      // Prefetch GROUP.md for all groups (fire-and-forget)
+      const groupMdCache = getOrCreateGroupMdCache(account.accountId);
+      (async () => {
+        try {
+          const groups = await fetchBotGroups({ apiUrl: account.config.apiUrl, botToken: account.config.botToken!, log });
+          for (const g of groups) {
+            try {
+              const md = await getGroupMd({ apiUrl: account.config.apiUrl, botToken: account.config.botToken!, groupNo: g.group_no, log });
+              if (md.content) {
+                groupMdCache.set(g.group_no, { content: md.content, version: md.version });
+              }
+            } catch {
+              // Ignore per-group failures (group may not have GROUP.md)
+            }
+          }
+          if (groupMdCache.size > 0) {
+            log?.info?.(`dmwork: prefetched GROUP.md for ${groupMdCache.size} groups`);
+          }
+        } catch (err) {
+          log?.error?.(`dmwork: GROUP.md prefetch failed: ${String(err)}`);
+        }
+      })();
+
       ctx.setStatus({
         accountId: account.accountId,
         running: true,
@@ -558,6 +594,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
             memberMap,
             uidToNameMap,
             groupCacheTimestamps,
+            groupMdCache,
             log,
             statusSink,
           }).catch((err) => {

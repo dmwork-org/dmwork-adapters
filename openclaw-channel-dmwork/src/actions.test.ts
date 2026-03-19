@@ -540,6 +540,144 @@ describe("handleDmworkMessageAction", () => {
       expect(result.error).toContain("botToken");
     });
   });
+
+  // -----------------------------------------------------------------------
+  // group-md-read action
+  // -----------------------------------------------------------------------
+  describe("group-md-read — read from cache", () => {
+    it("should return cached GROUP.md content", async () => {
+      const groupMdCache = new Map([
+        ["grp1", { content: "# Group Rules\nBe nice.", version: 3 }],
+      ]);
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "group-md-read",
+        args: { target: "group:grp1" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        groupMdCache,
+      });
+
+      expect(result.ok).toBe(true);
+      const data = result.data as any;
+      expect(data.content).toBe("# Group Rules\nBe nice.");
+      expect(data.version).toBe(3);
+      expect(data.source).toBe("cache");
+    });
+  });
+
+  describe("group-md-read — cache miss (API fallback)", () => {
+    it("should fetch from API when not in cache", async () => {
+      globalThis.fetch = mockFetch({
+        "/v1/bot/groups/grp1/md": async () =>
+          jsonResponse({
+            content: "# From API",
+            version: 5,
+            updated_at: "2024-03-01T00:00:00Z",
+            updated_by: "user_abc",
+          }),
+      });
+
+      const groupMdCache = new Map<string, { content: string; version: number }>();
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "group-md-read",
+        args: { target: "group:grp1" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        groupMdCache,
+      });
+
+      expect(result.ok).toBe(true);
+      const data = result.data as any;
+      expect(data.content).toBe("# From API");
+      expect(data.version).toBe(5);
+      expect(data.updated_by).toBe("user_abc");
+      // Cache should be updated
+      expect(groupMdCache.get("grp1")?.version).toBe(5);
+    });
+  });
+
+  describe("group-md-read — missing target", () => {
+    it("should return error when target is missing", async () => {
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "group-md-read",
+        args: {},
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("target");
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // group-md-update action
+  // -----------------------------------------------------------------------
+  describe("group-md-update — update successfully", () => {
+    it("should update GROUP.md and return new version", async () => {
+      globalThis.fetch = mockFetch({
+        "/v1/bot/groups/grp1/md": async (_url, init) => {
+          if (init?.method === "PUT") {
+            return jsonResponse({ version: 6 });
+          }
+          return new Response("Not found", { status: 404 });
+        },
+      });
+
+      const groupMdCache = new Map<string, { content: string; version: number }>();
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "group-md-update",
+        args: { target: "group:grp1", content: "# Updated Rules" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        groupMdCache,
+      });
+
+      expect(result.ok).toBe(true);
+      const data = result.data as any;
+      expect(data.version).toBe(6);
+      // Cache should be updated
+      expect(groupMdCache.get("grp1")?.content).toBe("# Updated Rules");
+      expect(groupMdCache.get("grp1")?.version).toBe(6);
+    });
+  });
+
+  describe("group-md-update — missing target", () => {
+    it("should return error when target is missing", async () => {
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "group-md-update",
+        args: { content: "some content" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("target");
+    });
+  });
+
+  describe("group-md-update — missing content", () => {
+    it("should return error when content is missing", async () => {
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "group-md-update",
+        args: { target: "group:grp1" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("content");
+    });
+  });
 });
 
 describe("parseTarget", () => {

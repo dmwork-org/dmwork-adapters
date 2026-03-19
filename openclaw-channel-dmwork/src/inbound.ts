@@ -1,5 +1,5 @@
 import type { ChannelLogSink, OpenClawConfig } from "openclaw/plugin-sdk";
-import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, postJson } from "./api-fetch.js";
+import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson } from "./api-fetch.js";
 import type { ResolvedDmworkAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType } from "./types.js";
@@ -473,12 +473,34 @@ export async function handleInboundMessage(params: {
   memberMap: Map<string, string>;  // displayName -> uid mapping
   uidToNameMap: Map<string, string>;  // uid -> displayName mapping (reverse)
   groupCacheTimestamps: Map<string, number>;  // groupId -> lastFetchedAt
+  groupMdCache?: Map<string, { content: string; version: number }>;
   log?: ChannelLogSink;
   statusSink?: DmworkStatusSink;
 }) {
-  const { account, message, botUid, groupHistories, memberMap, uidToNameMap, groupCacheTimestamps, log, statusSink } = params;
+  const { account, message, botUid, groupHistories, memberMap, uidToNameMap, groupCacheTimestamps, groupMdCache, log, statusSink } = params;
 
   await ensureSdkLoaded();
+
+  // Detect GROUP.md update notification — refresh cache silently, do NOT pass to LLM
+  const eventType = (message.payload as any)?.event?.type;
+  if (eventType === "group_md_updated" && message.channel_id && groupMdCache) {
+    log?.info?.(`dmwork: GROUP.md updated notification for group ${message.channel_id}`);
+    try {
+      const md = await getGroupMd({
+        apiUrl: account.config.apiUrl,
+        botToken: account.config.botToken ?? "",
+        groupNo: message.channel_id,
+        log,
+      });
+      if (md.content) {
+        groupMdCache.set(message.channel_id, { content: md.content, version: md.version });
+        log?.info?.(`dmwork: GROUP.md cache updated for ${message.channel_id} (v${md.version})`);
+      }
+    } catch (err) {
+      log?.error?.(`dmwork: failed to refresh GROUP.md: ${String(err)}`);
+    }
+    return;
+  }
 
   const isGroup =
     typeof message.channel_id === "string" &&
@@ -761,6 +783,9 @@ export async function handleInboundMessage(params: {
     body: finalBody,
   });
 
+  // Inject GROUP.md as GroupSystemPrompt for group messages
+  const groupSystemPrompt = isGroup && groupMdCache ? groupMdCache.get(message.channel_id!)?.content : undefined;
+
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
     BodyForAgent: body,  // ← 关键！AI 实际读取的是这个字段！
@@ -782,6 +807,7 @@ export async function handleInboundMessage(params: {
     MessageSid: String(message.message_id),
     Timestamp: message.timestamp ? message.timestamp * 1000 : undefined,
     GroupSubject: isGroup ? message.channel_id : undefined,
+    GroupSystemPrompt: groupSystemPrompt,
     Provider: "dmwork",
     Surface: "dmwork",
     OriginatingChannel: "dmwork",

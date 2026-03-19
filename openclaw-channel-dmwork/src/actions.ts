@@ -12,6 +12,8 @@ import {
   getGroupMembers,
   fetchBotGroups,
   getGroupInfo,
+  getGroupMd,
+  updateGroupMd,
 } from "./api-fetch.js";
 import { uploadAndSendMedia } from "./inbound.js";
 import { parseMentions } from "./mention-utils.js";
@@ -48,9 +50,10 @@ export async function handleDmworkMessageAction(params: {
   botToken: string;
   memberMap?: Map<string, string>;
   uidToNameMap?: Map<string, string>;
+  groupMdCache?: Map<string, { content: string; version: number }>;
   log?: LogSink;
 }): Promise<MessageActionResult> {
-  const { action, args, apiUrl, botToken, memberMap, uidToNameMap, log } =
+  const { action, args, apiUrl, botToken, memberMap, uidToNameMap, groupMdCache, log } =
     params;
 
   if (!botToken) {
@@ -68,6 +71,10 @@ export async function handleDmworkMessageAction(params: {
       return handleChannelList({ apiUrl, botToken, log });
     case "channel-info":
       return handleChannelInfo({ args, apiUrl, botToken, log });
+    case "group-md-read":
+      return handleGroupMdRead({ args, apiUrl, botToken, groupMdCache, log });
+    case "group-md-update":
+      return handleGroupMdUpdate({ args, apiUrl, botToken, groupMdCache, log });
     default:
       return { ok: false, error: `Unknown action: ${action}` };
   }
@@ -284,4 +291,101 @@ async function handleChannelInfo(params: {
   });
 
   return { ok: true, data: info };
+}
+
+// ---------------------------------------------------------------------------
+// group-md-read
+// ---------------------------------------------------------------------------
+
+async function handleGroupMdRead(params: {
+  args: Record<string, unknown>;
+  apiUrl: string;
+  botToken: string;
+  groupMdCache?: Map<string, { content: string; version: number }>;
+  log?: LogSink;
+}): Promise<MessageActionResult> {
+  const { args, apiUrl, botToken, groupMdCache, log } = params;
+
+  const target = args.target as string | undefined;
+  if (!target) {
+    return { ok: false, error: "Missing required parameter: target" };
+  }
+
+  const { channelId } = parseTarget(target);
+
+  // Try cache first
+  const cached = groupMdCache?.get(channelId);
+  if (cached) {
+    return { ok: true, data: { content: cached.content, version: cached.version, source: "cache" } };
+  }
+
+  // Cache miss — fetch from API
+  try {
+    const md = await getGroupMd({
+      apiUrl,
+      botToken,
+      groupNo: channelId,
+      log: log
+        ? {
+            info: (...a: unknown[]) => log.info?.(String(a[0])),
+            error: (...a: unknown[]) => log.error?.(String(a[0])),
+          }
+        : undefined,
+    });
+    // Update cache on successful fetch
+    if (groupMdCache && md.content) {
+      groupMdCache.set(channelId, { content: md.content, version: md.version });
+    }
+    return { ok: true, data: { content: md.content, version: md.version, updated_at: md.updated_at, updated_by: md.updated_by } };
+  } catch (err) {
+    return { ok: false, error: `Failed to read GROUP.md: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// group-md-update
+// ---------------------------------------------------------------------------
+
+async function handleGroupMdUpdate(params: {
+  args: Record<string, unknown>;
+  apiUrl: string;
+  botToken: string;
+  groupMdCache?: Map<string, { content: string; version: number }>;
+  log?: LogSink;
+}): Promise<MessageActionResult> {
+  const { args, apiUrl, botToken, groupMdCache, log } = params;
+
+  const target = args.target as string | undefined;
+  if (!target) {
+    return { ok: false, error: "Missing required parameter: target" };
+  }
+
+  const content = args.content as string | undefined;
+  if (content == null) {
+    return { ok: false, error: "Missing required parameter: content" };
+  }
+
+  const { channelId } = parseTarget(target);
+
+  try {
+    const result = await updateGroupMd({
+      apiUrl,
+      botToken,
+      groupNo: channelId,
+      content,
+      log: log
+        ? {
+            info: (...a: unknown[]) => log.info?.(String(a[0])),
+            error: (...a: unknown[]) => log.error?.(String(a[0])),
+          }
+        : undefined,
+    });
+    // Update local cache on success
+    if (groupMdCache) {
+      groupMdCache.set(channelId, { content, version: result.version });
+    }
+    return { ok: true, data: { version: result.version } };
+  } catch (err) {
+    return { ok: false, error: `Failed to update GROUP.md: ${err instanceof Error ? err.message : String(err)}` };
+  }
 }

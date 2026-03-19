@@ -330,6 +330,53 @@ export async function getGroupInfo(params: {
   }
 }
 
+// Fetch GROUP.md content for a group
+export async function getGroupMd(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  log?: { info?: (msg: string) => void; error?: (msg: string) => void };
+}): Promise<{ content: string; version: number; updated_at: string | null; updated_by: string }> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${params.groupNo}/md`;
+  const resp = await fetch(url, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${params.botToken}`,
+    },
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`getGroupMd failed (${resp.status}): ${text || resp.statusText}`);
+  }
+  return await resp.json();
+}
+
+// Update GROUP.md content for a group (requires bot_admin permission)
+export async function updateGroupMd(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  content: string;
+  log?: { info?: (msg: string) => void; error?: (msg: string) => void };
+}): Promise<{ version: number }> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${params.groupNo}/md`;
+  const resp = await fetch(url, {
+    method: "PUT",
+    headers: {
+      ...DEFAULT_HEADERS,
+      Authorization: `Bearer ${params.botToken}`,
+    },
+    body: JSON.stringify({ content: params.content }),
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`updateGroupMd failed (${resp.status}): ${text || resp.statusText}`);
+  }
+  return await resp.json();
+}
+
 /**
  * 获取频道历史消息（用于注入上下文）
  * @param params.log - Optional logger for consistent logging with OpenClaw log system
