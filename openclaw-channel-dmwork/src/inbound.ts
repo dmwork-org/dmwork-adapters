@@ -525,16 +525,18 @@ export async function handleInboundMessage(params: {
 
     // Check for structured event messages (group_md_updated / group_md_deleted)
     const eventType = message.payload?.event?.type;
+    console.error(`[dmwork-event] isGroup=${isGroup} channel_id=${message.channel_id} eventType=${eventType ?? 'none'} from=${message.from_uid}`);
     if (eventType === "group_md_updated" || eventType === "group_md_deleted") {
       // Resolve agentId for disk path
       const core = getDmworkRuntime();
       const cfg = core.config.loadConfig() as OpenClawConfig;
       try {
         const route = core.channel.routing.resolveAgentRoute({
-          cfg,
-          channel: "dmwork",
+          config: cfg,
+          provider: "dmwork",
           accountId: account.accountId,
-          peer: { kind: "group", id: message.channel_id },
+          channelType: "group",
+          peerId: message.channel_id,
         });
         await handleGroupMdEvent({
           agentId: route.agentId,
