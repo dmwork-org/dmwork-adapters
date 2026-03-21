@@ -108,6 +108,7 @@ export async function uploadAndSendMedia(params: {
     key: creds.key,
     fileBuffer: buffer,
     contentType,
+    cdnBaseUrl: creds.cdnBaseUrl,
   });
 
   // Determine message type from MIME
