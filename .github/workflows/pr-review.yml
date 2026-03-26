@@ -1,0 +1,66 @@
+name: Auto PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  review-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check high-risk patterns
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+            });
+
+            const highRiskPatterns = [
+              /webhook/i,
+              /auth/i,
+              /token/i,
+              /secret/i,
+              /\.env/,
+              /openclaw\.plugin\.json/,
+            ];
+
+            const riskFiles = [];
+            for (const file of files) {
+              for (const pattern of highRiskPatterns) {
+                if (pattern.test(file.filename) || pattern.test(file.patch || '')) {
+                  riskFiles.push(`⚠️ ${file.filename} — matches: ${pattern}`);
+                  break;
+                }
+              }
+            }
+
+            if (riskFiles.length > 0) {
+              const body = `## 🔴 HIGH-RISK PR 检测\n\n此 PR 涉及敏感模块，**必须人工 review**：\n\n${riskFiles.join('\n')}\n\n请 repo owner 审核后再 merge。`;
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                body: body,
+              });
+
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                labels: ['high-risk'],
+              });
+            }
+
+      - name: Remind review needed
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: '📋 **Review Checklist**\n- [ ] 是否涉及 webhook payload 格式变更？\n- [ ] 是否有认证/token 相关改动？\n- [ ] 是否修改了 plugin.json 配置？\n- [ ] 影响范围已评估\n- [ ] 测试覆盖',
+            });
