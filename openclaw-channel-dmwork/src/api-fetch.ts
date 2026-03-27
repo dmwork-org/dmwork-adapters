@@ -5,7 +5,6 @@
 
 import { ChannelType, MessageType } from "./types.js";
 import path from "path";
-import { createReadStream, statSync } from "node:fs";
 import { open } from "node:fs/promises";
 // @ts-ignore — cos-nodejs-sdk-v5 has incomplete TypeScript definitions
 import COS from "cos-nodejs-sdk-v5";
