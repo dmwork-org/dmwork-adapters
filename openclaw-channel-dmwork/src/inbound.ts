@@ -111,7 +111,14 @@ export async function uploadAndSendMedia(params: {
     if (!body) throw new Error(`No response body from ${mediaUrl}`);
     const nodeStream = Readable.fromWeb(body as any);
     const ws = fsCreateWriteStream(tempPath);
-    await pipeline(nodeStream, ws);
+    try {
+      await pipeline(nodeStream, ws);
+    } catch (err) {
+      // Cleanup partial temp file on download failure
+      await fsUnlink(tempPath).catch(() => {});
+      tempPath = undefined;
+      throw err;
+    }
 
     const st = fsStatSync(tempPath);
     fileBody = fsCreateReadStream(tempPath);

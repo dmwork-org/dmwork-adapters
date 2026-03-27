@@ -53,7 +53,13 @@ async function downloadToTempFile(url: string, filename: string, signal?: AbortS
   if (!body) throw new Error(`No response body from ${url}`);
   const nodeStream = Readable.fromWeb(body as any);
   const ws = createWriteStream(tempPath);
-  await pipeline(nodeStream, ws);
+  try {
+    await pipeline(nodeStream, ws);
+  } catch (err) {
+    // Cleanup partial temp file on download failure
+    await unlink(tempPath).catch(() => {});
+    throw err;
+  }
   return { tempPath, contentType };
 }
 
