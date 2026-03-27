@@ -15,7 +15,8 @@ import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContent
 import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
-import { parseMentions } from "./mention-utils.js";
+import { buildEntitiesFromFallback } from "./mention-utils.js";
+import type { MentionEntity } from "./types.js";
 import { handleDmworkMessageAction, parseTarget } from "./actions.js";
 import { createDmworkManagementTools } from "./agent-tools.js";
 import { getOrCreateGroupMdCache, registerBotGroupIds, getKnownGroupIds } from "./group-md.js";
@@ -349,18 +350,20 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
 
       const { channelId, channelType } = parseTarget(targetForParse, undefined, getKnownGroupIds());
 
+      let mentionEntities: MentionEntity[] = [];
+
       if (channelType === ChannelType.Group) {
-        // Parse @mentions from message content (e.g., "@chenpipi_bot", "@陈皮皮")
-        const contentMentionNames = parseMentions(content);
-        for (const name of contentMentionNames) {
-          if (name && !mentionUids.includes(name)) {
-            mentionUids.push(name);
-            console.log(`[dmwork] parsed @mention from content: ${name}`);
+        // Resolve @name to uid via memberMap (fixes name-as-uid bug)
+        const accountMemberMap = getOrCreateMemberMap(
+          ctx.accountId ?? DEFAULT_ACCOUNT_ID,
+        );
+        const { entities, uids } = buildEntitiesFromFallback(content, accountMemberMap);
+        for (const uid of uids) {
+          if (!mentionUids.includes(uid)) {
+            mentionUids.push(uid);
           }
         }
-        if (mentionUids.length > 0) {
-          console.log(`[dmwork] sending message with mentionUids: ${mentionUids.join(", ")}`);
-        }
+        mentionEntities = entities;
       }
 
       await sendMessage({
@@ -370,6 +373,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         channelType,
         content,
         ...(mentionUids.length > 0 ? { mentionUids } : {}),
+        ...(mentionEntities.length > 0 ? { mentionEntities } : {}),
       });
 
       return { channel: "dmwork", to: ctx.to, messageId: "" };

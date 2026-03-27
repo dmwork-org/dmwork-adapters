@@ -11,8 +11,10 @@ import {
   downloadToTemp,
   uploadAndSendMedia,
   downloadMediaToLocal,
+  learnMembersFromMessage,
   type ResolveFileResult,
 } from "./inbound.js";
+import { extractMentionUids } from "./mention-utils.js";
 import { existsSync, unlinkSync, readFileSync } from "node:fs";
 
 /**
@@ -784,5 +786,91 @@ describe("downloadMediaToLocal", () => {
     expect(result).toBeDefined();
     expect(result!.endsWith(".mp4")).toBe(true);
     tempFiles.push(result!);
+  });
+});
+
+// ── learnMembersFromMessage tests ──
+
+describe("learnMembersFromMessage", () => {
+  it("entities path: should learn mappings from content substring", () => {
+    const memberByUid = new Map<string, string>();
+    const memberMap = new Map<string, string>();
+
+    learnMembersFromMessage(
+      "你好 @陈皮皮 和 @Bob",
+      {
+        entities: [
+          { uid: "uid_chen", offset: 3, length: 4 },
+          { uid: "uid_bob", offset: 10, length: 4 },
+        ],
+      },
+      "sender_uid",
+      "Sender",
+      memberByUid,
+      memberMap,
+    );
+
+    expect(memberMap.get("陈皮皮")).toBe("uid_chen");
+    expect(memberMap.get("Bob")).toBe("uid_bob");
+    expect(memberByUid.get("uid_chen")).toBe("陈皮皮");
+    expect(memberByUid.get("uid_bob")).toBe("Bob");
+  });
+
+  it("should fallback to uids when all entities are invalid", () => {
+    const memberByUid = new Map<string, string>();
+    const memberMap = new Map<string, string>();
+
+    learnMembersFromMessage(
+      "@Alice @Bob",
+      {
+        entities: [{} as any],
+        uids: ["uid_a", "uid_b"],
+      },
+      "sender_uid",
+      undefined,
+      memberByUid,
+      memberMap,
+    );
+
+    expect(memberMap.get("Alice")).toBe("uid_a");
+    expect(memberMap.get("Bob")).toBe("uid_b");
+  });
+
+  it("should always learn sender info", () => {
+    const memberByUid = new Map<string, string>();
+    const memberMap = new Map<string, string>();
+
+    learnMembersFromMessage(
+      "Hello",
+      undefined,
+      "sender_uid",
+      "Sender Name",
+      memberByUid,
+      memberMap,
+    );
+
+    expect(memberMap.get("Sender Name")).toBe("sender_uid");
+    expect(memberByUid.get("sender_uid")).toBe("Sender Name");
+  });
+});
+
+// ── Bot @ detection with entities support ──
+
+describe("Bot @ detection (entities support)", () => {
+  it("should detect bot from entities", () => {
+    const mention: MentionPayload = {
+      entities: [{ uid: "bot_uid", offset: 0, length: 4 }],
+    };
+    const mentionUids = extractMentionUids(mention);
+    expect(mentionUids.includes("bot_uid")).toBe(true);
+  });
+
+  it("should fallback to uids when entities are invalid", () => {
+    const mention: MentionPayload = {
+      entities: [{} as any],
+      uids: ["bot_uid"],
+    };
+    const mentionUids = extractMentionUids(mention);
+    expect(mentionUids.includes("bot_uid")).toBe(true);
   });
 });

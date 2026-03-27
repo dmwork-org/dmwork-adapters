@@ -47,8 +47,22 @@ export interface BotMessage {
   payload: MessagePayload;
 }
 
+/**
+ * Single mention with precise position in content.
+ * offset/length units are UTF-16 code units (same as JS string.length).
+ */
+export interface MentionEntity {
+  /** Target user's unique identifier */
+  uid: string;
+  /** Start position of @name in content (including @) */
+  offset: number;
+  /** Full length of @name (including @) */
+  length: number;
+}
+
 export interface MentionPayload {
   uids?: string[];
+  entities?: MentionEntity[];
   all?: boolean | number; // true or 1 = @all (API returns either depending on version)
 }
 
