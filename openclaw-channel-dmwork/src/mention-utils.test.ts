@@ -353,6 +353,48 @@ describe("convertContentForLLM", () => {
     expect(result).toContain("@[uid_chen_a:陈皮皮]");
     expect(result).toContain("@[uid_chen_b:陈皮皮]");
   });
+
+  it("v1 with memberMap: known names resolved, unknown left as-is", () => {
+    const content = "@Angie 你好 @阿达西不在家";
+    const mention: MentionPayload = { uids: ["angie_bot", "unknown_uid"] };
+    const memberMap = new Map([["Angie", "angie_bot"]]);
+    const result = convertContentForLLM(content, mention, memberMap);
+    expect(result).toBe("@[angie_bot:Angie] 你好 @阿达西不在家");
+  });
+
+  it("v1 without memberMap: backward compat positional pairing", () => {
+    const content = "@Alice @Bob";
+    const mention: MentionPayload = { uids: ["uid_a", "uid_b"] };
+    const result = convertContentForLLM(content, mention);
+    expect(result).toBe("@[uid_a:Alice] @[uid_b:Bob]");
+  });
+
+  it("v1 with email in content: email NOT matched, mentions correctly resolved", () => {
+    const content = "发给xinyi@mininglamp.com 然后找 @Angie";
+    const mention: MentionPayload = { uids: ["angie_bot"] };
+    const memberMap = new Map([["Angie", "angie_bot"]]);
+    const result = convertContentForLLM(content, mention, memberMap);
+    expect(result).toContain("@[angie_bot:Angie]");
+    // Email should remain unchanged (not converted to @[...] format)
+    expect(result).toContain("xinyi@mininglamp.com");
+    expect(result).toBe("发给xinyi@mininglamp.com 然后找 @[angie_bot:Angie]");
+  });
+
+  it("v1 with empty memberMap: no replacements", () => {
+    const content = "@Alice @Bob";
+    const mention: MentionPayload = { uids: ["uid_a", "uid_b"] };
+    const emptyMap = new Map<string, string>();
+    const result = convertContentForLLM(content, mention, emptyMap);
+    // Empty memberMap means hasMemberMap is false, falls back to uids
+    expect(result).toBe("@[uid_a:Alice] @[uid_b:Bob]");
+  });
+
+  it("v1 with empty uids and no memberMap: returns original", () => {
+    const content = "@Alice @Bob";
+    const mention: MentionPayload = { uids: [] };
+    const result = convertContentForLLM(content, mention);
+    expect(result).toBe("@Alice @Bob");
+  });
 });
 
 describe("buildSenderPrefix", () => {

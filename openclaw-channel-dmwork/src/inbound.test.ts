@@ -11,7 +11,7 @@ import {
   downloadToTemp,
   uploadAndSendMedia,
   downloadMediaToLocal,
-  learnMembersFromMessage,
+  buildMemberListPrefix,
   type ResolveFileResult,
 } from "./inbound.js";
 import { extractMentionUids } from "./mention-utils.js";
@@ -790,72 +790,6 @@ describe("downloadMediaToLocal", () => {
 });
 
 /**
- * Tests for learnMembersFromMessage — entities v2 path and v1 fallback.
- */
-describe("learnMembersFromMessage", () => {
-  it("entities 路径：应从 content substring 学习映射", () => {
-    const memberByUid = new Map<string, string>();
-    const memberMap = new Map<string, string>();
-
-    learnMembersFromMessage(
-      "你好 @陈皮皮 和 @Bob",
-      {
-        entities: [
-          { uid: "uid_chen", offset: 3, length: 4 },
-          { uid: "uid_bob", offset: 10, length: 4 },
-        ],
-      },
-      "sender_uid",
-      "Sender",
-      memberByUid,
-      memberMap,
-    );
-
-    expect(memberMap.get("陈皮皮")).toBe("uid_chen");
-    expect(memberMap.get("Bob")).toBe("uid_bob");
-    expect(memberByUid.get("uid_chen")).toBe("陈皮皮");
-    expect(memberByUid.get("uid_bob")).toBe("Bob");
-  });
-
-  it("entities 全部无效时应 fallback 到 uids", () => {
-    const memberByUid = new Map<string, string>();
-    const memberMap = new Map<string, string>();
-
-    learnMembersFromMessage(
-      "@Alice @Bob",
-      {
-        entities: [{} as any],
-        uids: ["uid_a", "uid_b"],
-      },
-      "sender_uid",
-      undefined,
-      memberByUid,
-      memberMap,
-    );
-
-    expect(memberMap.get("Alice")).toBe("uid_a");
-    expect(memberMap.get("Bob")).toBe("uid_b");
-  });
-
-  it("sender 信息应始终被学习", () => {
-    const memberByUid = new Map<string, string>();
-    const memberMap = new Map<string, string>();
-
-    learnMembersFromMessage(
-      "Hello",
-      undefined,
-      "sender_uid",
-      "Sender Name",
-      memberByUid,
-      memberMap,
-    );
-
-    expect(memberMap.get("Sender Name")).toBe("sender_uid");
-    expect(memberByUid.get("sender_uid")).toBe("Sender Name");
-  });
-});
-
-/**
  * Tests for Bot @ detection with entities support.
  */
 describe("Bot @ 检测（entities 支持）", () => {
@@ -874,5 +808,60 @@ describe("Bot @ 检测（entities 支持）", () => {
     };
     const mentionUids = extractMentionUids(mention);
     expect(mentionUids.includes("bot_uid")).toBe(true);
+  });
+});
+
+describe("buildMemberListPrefix", () => {
+  it("should return empty string for empty map", () => {
+    const map = new Map<string, string>();
+    expect(buildMemberListPrefix(map)).toBe("");
+  });
+
+  it("should inject full member list when ≤ 10 members", () => {
+    const map = new Map<string, string>([
+      ["uid_alice", "Alice"],
+      ["uid_bob", "Bob"],
+      ["uid_chen", "陈皮皮"],
+    ]);
+    const result = buildMemberListPrefix(map);
+    expect(result).toContain("[Group Members]");
+    expect(result).toContain("Alice (uid_alice)");
+    expect(result).toContain("Bob (uid_bob)");
+    expect(result).toContain("陈皮皮 (uid_chen)");
+    expect(result).toContain("@[uid:displayName]");
+  });
+
+  it("should inject full member list when exactly 10 members", () => {
+    const map = new Map<string, string>();
+    for (let i = 1; i <= 10; i++) {
+      map.set(`uid_${i}`, `User${i}`);
+    }
+    const result = buildMemberListPrefix(map);
+    expect(result).toContain("[Group Members]");
+    expect(result).toContain("User1 (uid_1)");
+    expect(result).toContain("User10 (uid_10)");
+  });
+
+  it("should inject hint message when > 10 members", () => {
+    const map = new Map<string, string>();
+    for (let i = 1; i <= 11; i++) {
+      map.set(`uid_${i}`, `User${i}`);
+    }
+    const result = buildMemberListPrefix(map);
+    expect(result).toContain("[Group Info]");
+    expect(result).toContain("11 members");
+    expect(result).toContain("group management tool");
+    expect(result).not.toContain("[Group Members]");
+    expect(result).not.toContain("User1 (uid_1)");
+  });
+
+  it("should inject hint message for large groups", () => {
+    const map = new Map<string, string>();
+    for (let i = 1; i <= 50; i++) {
+      map.set(`uid_${i}`, `User${i}`);
+    }
+    const result = buildMemberListPrefix(map);
+    expect(result).toContain("[Group Info]");
+    expect(result).toContain("50 members");
   });
 });

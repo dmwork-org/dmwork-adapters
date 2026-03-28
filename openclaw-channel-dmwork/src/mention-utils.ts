@@ -218,7 +218,7 @@ export function extractMentionUids(mention?: MentionPayload): string[] {
  *
  * 路径优先级：
  * 1. entities 有效 → 精确替换（v2）
- * 2. entities 无效 / 不存在 → uids + 正则顺序配对（v1 fallback）
+ * 2. entities 无效 / 不存在 → memberMap 查找（优先）或 uids 顺序配对（v1 fallback）
  * 3. 无 mention → 返回原始 content
  *
  * 替换从后向前进行，避免 offset 漂移。
@@ -226,6 +226,7 @@ export function extractMentionUids(mention?: MentionPayload): string[] {
 export function convertContentForLLM(
   content: string,
   mention?: MentionPayload,
+  memberMap?: Map<string, string>,
 ): string {
   if (!mention) return content;
 
@@ -266,8 +267,11 @@ export function convertContentForLLM(
     }
   }
 
-  // fallback: uids + 正则顺序配对（v1）
-  if (mention.uids && Array.isArray(mention.uids) && mention.uids.length > 0) {
+  // fallback（v1）: memberMap 查找优先，无 memberMap 时退回 uids 顺序配对
+  const hasMemberMap = memberMap && memberMap.size > 0;
+  const hasUids = mention.uids && Array.isArray(mention.uids) && mention.uids.length > 0;
+
+  if (hasMemberMap || hasUids) {
     let result = content;
     const pattern = new RegExp(MENTION_PATTERN.source, "g");
     let match;
@@ -278,20 +282,25 @@ export function convertContentForLLM(
       replacement: string;
     }[] = [];
 
-    while (
-      (match = pattern.exec(content)) !== null &&
-      i < mention.uids.length
-    ) {
+    while ((match = pattern.exec(content)) !== null) {
       const name = match[1];
-      const uid = mention.uids[i];
-      if (typeof uid === "string") {
+      let uid: string | undefined;
+
+      if (hasMemberMap) {
+        uid = memberMap!.get(name);
+      } else if (hasUids && i < mention.uids!.length) {
+        const candidate = mention.uids![i];
+        uid = typeof candidate === "string" ? candidate : undefined;
+        i++;
+      }
+
+      if (uid) {
         replacements.push({
           start: match.index,
           end: match.index + 1 + name.length,
           replacement: `@[${uid}:${name}]`,
         });
       }
-      i++;
     }
 
     for (let j = replacements.length - 1; j >= 0; j--) {

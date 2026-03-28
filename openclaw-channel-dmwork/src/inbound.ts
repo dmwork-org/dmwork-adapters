@@ -900,76 +900,18 @@ async function refreshGroupMemberCache(opts: {
   }
 }
 
-/**
- * 从消息中学习 uid ↔ displayName 映射关系。
- *
- * 学习来源：
- * 1. sender 信息（from_uid + from_name）
- * 2. entities 精确映射（v2 —— 从 content 中 substring 出 @name）
- * 3. uids + 正则顺序配对（v1 fallback）
- */
-export function learnMembersFromMessage(
-  content: string,
-  mention: MentionPayload | undefined,
-  fromUid: string,
-  fromName: string | undefined,
-  memberByUid: Map<string, string>,
-  memberMap: Map<string, string>,
-): void {
-  // 从 sender 学习
-  if (fromUid && fromName) {
-    memberByUid.set(fromUid, fromName);
-    memberMap.set(fromName, fromUid);
+export function buildMemberListPrefix(uidToNameMap: Map<string, string>): string {
+  if (uidToNameMap.size === 0) return "";
+
+  if (uidToNameMap.size <= 10) {
+    const members = Array.from(uidToNameMap.entries());
+    const memberLines = members
+      .map(([uid, name]) => `  ${name} (${uid})`)
+      .join("\n");
+    return `[Group Members]\n${memberLines}\n\nWhen mentioning a group member, use the format @[uid:displayName] (e.g. @[${members[0][0]}:${members[0][1]}]). I will convert it to the correct format before sending.\n\n`;
   }
 
-  if (!mention) return;
-
-  // 尝试从 entities 学习
-  if (mention.entities && Array.isArray(mention.entities)) {
-    let learned = 0;
-    for (const entity of mention.entities) {
-      if (
-        !entity ||
-        typeof entity !== "object" ||
-        Array.isArray(entity)
-      )
-        continue;
-      if (
-        typeof entity.uid !== "string" ||
-        typeof entity.offset !== "number" ||
-        typeof entity.length !== "number"
-      )
-        continue;
-      if (entity.offset < 0 || entity.offset + entity.length > content.length)
-        continue;
-
-      const raw = content.substring(
-        entity.offset,
-        entity.offset + entity.length,
-      );
-      if (!raw.startsWith("@")) continue;
-
-      const name = raw.substring(1);
-      memberByUid.set(entity.uid, name);
-      memberMap.set(name, entity.uid);
-      learned++;
-    }
-    if (learned > 0) return;
-  }
-
-  // fallback: uids + 正则顺序配对
-  if (mention.uids && Array.isArray(mention.uids) && mention.uids.length > 0) {
-    const contentMentions = extractMentionMatches(content);
-    const pairCount = Math.min(contentMentions.length, mention.uids.length);
-    for (let i = 0; i < pairCount; i++) {
-      const displayName = contentMentions[i].slice(1);
-      const uid = mention.uids[i];
-      if (typeof uid === "string" && displayName) {
-        memberByUid.set(uid, displayName);
-        memberMap.set(displayName, uid);
-      }
-    }
-  }
+  return `[Group Info] This group has ${uidToNameMap.size} members. Use the group management tool to look up member info when needed. When mentioning a group member, use the format @[uid:displayName].\n\n`;
 }
 
 export async function handleInboundMessage(params: {
@@ -1163,20 +1105,6 @@ export async function handleInboundMessage(params: {
     await refreshGroupMemberCache({ sessionId, memberMap, uidToNameMap, groupCacheTimestamps, apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", log });
   }
 
-  // Build displayName ↔ uid mapping from message content + mention (entities or uids)
-  // v2: entities provide precise uid+offset+length, avoiding email false positives
-  // v1 fallback: regex-match @names from content, pair positionally with mention.uids
-  if (isGroup) {
-    learnMembersFromMessage(
-      rawBody,
-      message.payload?.mention,
-      message.from_uid,
-      uidToNameMap.get(message.from_uid),
-      uidToNameMap,
-      memberMap,
-    );
-  }
-
   if (isGroup && requireMention) {
     const mentionUids = extractMentionUids(message.payload?.mention);
     // mention.all can be boolean `true` or numeric `1` depending on API version
@@ -1277,7 +1205,7 @@ export async function handleInboundMessage(params: {
       const messagesJson = JSON.stringify(entries.map((e: any) => {
         // Convert @name → @[uid:name] for LLM context
         const bodyForLLM = e.mention
-          ? convertContentForLLM(e.body, e.mention)
+          ? convertContentForLLM(e.body, e.mention, memberMap)
           : e.body;
         // sender format: displayName(uid)
         const senderLabel = buildSenderPrefix(e.sender, uidToNameMap);
@@ -1356,14 +1284,7 @@ export async function handleInboundMessage(params: {
   });
 
   // Inject member list for group messages to help LLM learn @[uid:name] format
-  let memberListPrefix = "";
-  if (isGroup && uidToNameMap.size > 0) {
-    const recentMembers = Array.from(uidToNameMap.entries()).slice(0, 50);
-    const memberLines = recentMembers
-      .map(([uid, name]) => `  ${name} (${uid})`)
-      .join("\n");
-    memberListPrefix = `[Group Members]\n${memberLines}\n\nWhen mentioning a group member, use the format @[uid:displayName] (e.g. @[${recentMembers[0][0]}:${recentMembers[0][1]}]). I will convert it to the correct format before sending.\n\n`;
-  }
+  const memberListPrefix = isGroup ? buildMemberListPrefix(uidToNameMap) : "";
 
   const finalBody = (memberListPrefix || historyPrefix || quotePrefix)
     ? (memberListPrefix + historyPrefix + quotePrefix + rawBody)
