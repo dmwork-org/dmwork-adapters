@@ -2,6 +2,10 @@
  * Shared @mention parsing utilities.
  * Ensures consistent mention detection across inbound and outbound code paths.
  *
+ * Supports two formats:
+ * - v1: @name (regex-based, positional pairing with uids)
+ * - v2: @[uid:name] (structured, precise mapping via entities)
+ *
  * Fixes: https://github.com/dmwork-org/dmwork-adapters/issues/31
  */
 
@@ -10,28 +14,23 @@ import type { MentionEntity, MentionPayload } from "./types.js";
 /**
  * Regex pattern for matching @mentions in message content.
  *
- * Lookbehind: @ must be preceded by start-of-string or a non-alphanumeric
- * character (blacklist approach — excludes email-like user@domain).
+ * 前置边界（lookbehind）：@ 前面必须是行首或非字母数字字符。
+ * 使用黑名单方式 [^a-zA-Z0-9] 排除邮箱（与 v5 保持一致）。
  *
- * Name supports: letters, digits, underscores, CJK characters, Latin
- * extended (accented), Japanese kana, Korean syllables, dots, hyphens.
+ * name 支持：字母、数字、下划线、CJK 字符、点号、连字符、重音字母。
  *
- * Capture groups:
- *   match[0] = full match (@name, lookbehind does not consume)
- *   match[1] = name (without @)
+ * 捕获组说明：
+ *   match[0] = 完整匹配（@name，lookbehind 不消耗字符）
+ *   match[1] = name（不含 @）
  */
 export const MENTION_PATTERN =
   /(?:^|(?<=\s|[^a-zA-Z0-9]))@([\w\u00C0-\u024F\u4e00-\u9fff\u3040-\u30FF\uAC00-\uD7AF.\-]+)/g;
 
 /**
- * Match @[uid:displayName] format (adapter↔LLM internal use).
+ * 匹配 @[uid:displayName] 格式（adapter↔LLM 内部使用）。
  *
- * uid charset: [\w.\-]+ — covers all known dmwork uid formats:
- *   - alphanumeric with underscores: uid_chen, boris_dev_bot
- *   - 32-char hex: 11be65096f214886b69ef9d8fcfa5c55
- *   - dots/hyphens: thomas.ford-1
- *
- * name charset: [^\]\n]+ — forbids brackets and newlines, allows everything else
+ * uid 字符集：[\w.\-]+ — 覆盖 dmwork 已知的所有 uid 格式
+ * name 字符集：[^\]\n]+ — 禁止方括号和换行，其余字符均允许
  */
 export const STRUCTURED_MENTION_PATTERN = /@\[([\w.\-]+):([^\]\n]+)\]/g;
 
@@ -45,12 +44,8 @@ export const STRUCTURED_MENTION_PATTERN = /@\[([\w.\-]+):([^\]\n]+)\]/g;
  */
 export function parseMentions(content: string): string[] {
   const regex = new RegExp(MENTION_PATTERN.source, "g");
-  const results: string[] = [];
-  let match;
-  while ((match = regex.exec(content)) !== null) {
-    results.push(match[1]);
-  }
-  return results;
+  const matches = content.match(regex) ?? [];
+  return matches.map((m) => m.slice(1)); // Remove @ prefix
 }
 
 /**
@@ -63,28 +58,23 @@ export function parseMentions(content: string): string[] {
  */
 export function extractMentionMatches(content: string): string[] {
   const regex = new RegExp(MENTION_PATTERN.source, "g");
-  const results: string[] = [];
-  let match;
-  while ((match = regex.exec(content)) !== null) {
-    results.push(match[0]);
-  }
-  return results;
+  return content.match(regex) ?? [];
 }
 
-// ── Structured mention types ──
+// ── Structured Mention (@[uid:name]) ──────────────────────────────────────────
 
 export interface StructuredMention {
   uid: string;
   name: string;
-  /** Start position of @[uid:name] in the original text */
+  /** @[uid:name] 在原始文本中的起始位置 */
   offset: number;
-  /** Full length of @[uid:name] */
+  /** @[uid:name] 的完整长度 */
   length: number;
 }
 
 /**
- * Parse @[uid:name] format mentions from text.
- * Used to process structured mentions in LLM replies.
+ * 解析文本中的 @[uid:name] 格式 mention。
+ * 用于处理 LLM 回复中的结构化 mention。
  */
 export function parseStructuredMentions(text: string): StructuredMention[] {
   const results: StructuredMention[] = [];
@@ -101,28 +91,22 @@ export function parseStructuredMentions(text: string): StructuredMention[] {
   return results;
 }
 
-// ── Conversion result ──
+// ── Convert @[uid:name] → @name (outbound: LLM reply → human readable) ──────
 
 export interface ConvertResult {
-  /** Human-readable content (@[uid:name] → @name) */
+  /** 人类可读的 content（@[uid:name] → @name） */
   content: string;
-  /** Valid mention entities with precise positions */
+  /** 有效 mention 的精确位置信息 */
   entities: MentionEntity[];
-  /** Valid mention UIDs in offset-ascending order (matches entities order) */
+  /** 有效 mention 的 uid 列表（按 offset 升序，与 entities 顺序一致） */
   uids: string[];
 }
 
 /**
- * Convert @[uid:name] in text to @name, building entities and uids.
+ * 将文本中的 @[uid:name] 转换为 @name，同时构建 entities 和 uids。
  *
- * Uses incremental construction: traverses mentions in offset-ascending
- * order, concatenating output segments to naturally track each mention's
- * precise position — avoids indexOf re-scanning that causes same-name
- * mentions to bind to wrong positions.
- *
- * @param text - Original text containing @[uid:name] (typically from LLM reply)
- * @param mentions - Result from parseStructuredMentions
- * @param validUids - Set of known valid UIDs (from uidToNameMap keys)
+ * 使用增量构建算法：按 offset 升序逐段拼接输出字符串，自然追踪每个 mention
+ * 在输出中的精确位置，避免 indexOf 重扫导致的同名 mention 绑错位置问题。
  */
 export function convertStructuredMentions(
   text: string,
@@ -137,15 +121,12 @@ export function convertStructuredMentions(
   let cursor = 0;
 
   for (const m of sorted) {
-    // 1. Add plain text before this mention
     content += text.substring(cursor, m.offset);
 
-    // 2. Replace @[uid:name] → @name
     const replacement = `@${m.name}`;
-    const newOffset = content.length; // precise position in output
+    const newOffset = content.length;
     content += replacement;
 
-    // 3. Record entity if uid is valid
     if (validUids.has(m.uid)) {
       entities.push({
         uid: m.uid,
@@ -154,26 +135,23 @@ export function convertStructuredMentions(
       });
       uids.push(m.uid);
     }
-    // Invalid uid: @name stays as plain text, not added to entities
 
     cursor = m.offset + m.length;
   }
 
-  // 4. Add remaining text after last mention
   content += text.substring(cursor);
 
   return { content, entities, uids };
 }
 
+// ── Build entities from plain @name (fallback path) ──────────────────────────
+
 /**
- * Build entities from plain @name text (fallback path).
- * Resolves each @name to a uid via memberMap (displayName → uid).
+ * 从纯 @name 格式的文本中构建 entities（fallback 路径）。
+ * 通过 memberMap（displayName → uid）解析每个 @name 对应的 uid。
  *
- * Depends on MENTION_PATTERN capture group: match[1] is name (without @).
- * Lookbehind does not consume characters, so match.index points to @.
- *
- * @param content - Human-readable content (no @[uid:name])
- * @param memberMap - displayName → uid mapping
+ * 依赖 MENTION_PATTERN 的捕获组：match[1] 为 name（不含 @）。
+ * lookbehind 不消耗字符，因此 match.index 直接指向 @ 的位置。
  */
 export function buildEntitiesFromFallback(
   content: string,
@@ -186,16 +164,11 @@ export function buildEntitiesFromFallback(
   let match;
 
   while ((match = pattern.exec(content)) !== null) {
-    // match[1] is name (without @) — depends on MENTION_PATTERN capture group
     const name = match[1];
     const uid = memberMap.get(name);
 
-    if (!uid) {
-      // Cannot resolve uid (hallucination, email false positive, etc.) — skip
-      continue;
-    }
+    if (!uid) continue;
 
-    // Lookbehind does not consume characters, match.index is @ position
     const atName = `@${name}`;
     entities.push({ uid, offset: match.index, length: atName.length });
     uids.push(uid);
@@ -204,20 +177,19 @@ export function buildEntitiesFromFallback(
   return { entities, uids };
 }
 
+// ── Extract UIDs from MentionPayload (entities-first with fallback) ──────────
+
 /**
- * Extract mention UIDs with compatibility fallback.
+ * 兼容提取 mention 中的 uid 列表。
  *
- * Priority:
- * 1. Valid entries from entities → use their UIDs
- * 2. All entities invalid → fall through to uids
- * 3. No uids either → empty array
- *
- * Fixes: invalid entities suppressing uids fallback.
+ * 优先级：
+ * 1. entities 中有效条目的 uid → 使用
+ * 2. entities 全部无效 → fallback 到 uids
+ * 3. uids 也无效 → 返回空数组
  */
 export function extractMentionUids(mention?: MentionPayload): string[] {
   if (!mention) return [];
 
-  // Try entities first
   if (mention.entities && Array.isArray(mention.entities)) {
     const validUids = mention.entities
       .filter(
@@ -229,11 +201,9 @@ export function extractMentionUids(mention?: MentionPayload): string[] {
       )
       .map((e) => e.uid);
 
-    // Only return if we got valid results; otherwise fall through to uids
     if (validUids.length > 0) return validUids;
   }
 
-  // Fallback to uids
   if (mention.uids && Array.isArray(mention.uids)) {
     return mention.uids.filter((uid): uid is string => typeof uid === "string");
   }
@@ -241,18 +211,17 @@ export function extractMentionUids(mention?: MentionPayload): string[] {
   return [];
 }
 
+// ── Convert @name → @[uid:name] for LLM context ─────────────────────────────
+
 /**
- * Convert @name in historical messages to @[uid:name] for LLM comprehension.
+ * 将历史消息中的 @name 转换为 @[uid:name] 格式，供 LLM 理解 mention 语义。
  *
- * Priority:
- * 1. Valid entities → precise replacement (v2)
- * 2. Invalid/missing entities → uids + regex sequential pairing (v1 fallback)
- * 3. No mention → return original content
+ * 路径优先级：
+ * 1. entities 有效 → 精确替换（v2）
+ * 2. entities 无效 / 不存在 → uids + 正则顺序配对（v1 fallback）
+ * 3. 无 mention → 返回原始 content
  *
- * Replaces back-to-front to avoid offset drift.
- *
- * Fallback path depends on MENTION_PATTERN capture group (match[1]).
- * Lookbehind does not consume characters, match.index points to @.
+ * 替换从后向前进行，避免 offset 漂移。
  */
 export function convertContentForLLM(
   content: string,
@@ -260,7 +229,7 @@ export function convertContentForLLM(
 ): string {
   if (!mention) return content;
 
-  // Try entities (v2)
+  // 尝试用 entities（v2）
   if (mention.entities && Array.isArray(mention.entities)) {
     const validEntities = mention.entities.filter(
       (e): e is MentionEntity =>
@@ -274,12 +243,10 @@ export function convertContentForLLM(
         Number.isFinite(e.length) &&
         e.offset >= 0 &&
         e.length > 0 &&
-        e.offset + e.length <= content.length, // bounds check against original content
+        e.offset + e.length <= content.length,
     );
 
-    // Only use v2 path if we have valid entities
     if (validEntities.length > 0) {
-      // Replace back-to-front to avoid offset drift
       const sorted = [...validEntities].sort((a, b) => b.offset - a.offset);
       let result = content;
       for (const entity of sorted) {
@@ -287,7 +254,7 @@ export function convertContentForLLM(
           entity.offset,
           entity.offset + entity.length,
         );
-        if (!original.startsWith("@")) continue; // defense: skip if position mismatch
+        if (!original.startsWith("@")) continue;
         const name = original.substring(1);
         const replacement = `@[${entity.uid}:${name}]`;
         result =
@@ -297,10 +264,9 @@ export function convertContentForLLM(
       }
       return result;
     }
-    // No valid entities → fall through to uids
   }
 
-  // Fallback: uids + regex sequential pairing (v1)
+  // fallback: uids + 正则顺序配对（v1）
   if (mention.uids && Array.isArray(mention.uids) && mention.uids.length > 0) {
     let result = content;
     const pattern = new RegExp(MENTION_PATTERN.source, "g");
@@ -316,9 +282,7 @@ export function convertContentForLLM(
       (match = pattern.exec(content)) !== null &&
       i < mention.uids.length
     ) {
-      // match[1] is name — depends on MENTION_PATTERN capture group
       const name = match[1];
-      // Lookbehind does not consume characters, match.index points to @
       const uid = mention.uids[i];
       if (typeof uid === "string") {
         replacements.push({
@@ -330,7 +294,6 @@ export function convertContentForLLM(
       i++;
     }
 
-    // Replace back-to-front
     for (let j = replacements.length - 1; j >= 0; j--) {
       const r = replacements[j];
       result =
@@ -342,4 +305,18 @@ export function convertContentForLLM(
   }
 
   return content;
+}
+
+// ── Sender prefix utility ────────────────────────────────────────────────────
+
+/**
+ * Build a sender label in the format "displayName(uid)" for history context.
+ * Falls back to just uid if no name is found.
+ */
+export function buildSenderPrefix(
+  fromUid: string,
+  uidToNameMap: Map<string, string>,
+): string {
+  const name = uidToNameMap.get(fromUid);
+  return name ? `${name}(${fromUid})` : fromUid;
 }

@@ -789,10 +789,11 @@ describe("downloadMediaToLocal", () => {
   });
 });
 
-// ── learnMembersFromMessage tests ──
-
+/**
+ * Tests for learnMembersFromMessage — entities v2 path and v1 fallback.
+ */
 describe("learnMembersFromMessage", () => {
-  it("entities path: should learn mappings from content substring", () => {
+  it("entities 路径：应从 content substring 学习映射", () => {
     const memberByUid = new Map<string, string>();
     const memberMap = new Map<string, string>();
 
@@ -816,7 +817,7 @@ describe("learnMembersFromMessage", () => {
     expect(memberByUid.get("uid_bob")).toBe("Bob");
   });
 
-  it("should fallback to uids when all entities are invalid", () => {
+  it("entities 全部无效时应 fallback 到 uids", () => {
     const memberByUid = new Map<string, string>();
     const memberMap = new Map<string, string>();
 
@@ -836,7 +837,7 @@ describe("learnMembersFromMessage", () => {
     expect(memberMap.get("Bob")).toBe("uid_b");
   });
 
-  it("should always learn sender info", () => {
+  it("sender 信息应始终被学习", () => {
     const memberByUid = new Map<string, string>();
     const memberMap = new Map<string, string>();
 
@@ -854,10 +855,11 @@ describe("learnMembersFromMessage", () => {
   });
 });
 
-// ── Bot @ detection with entities support ──
-
-describe("Bot @ detection (entities support)", () => {
-  it("should detect bot from entities", () => {
+/**
+ * Tests for Bot @ detection with entities support.
+ */
+describe("Bot @ 检测（entities 支持）", () => {
+  it("应从 entities 检测 bot 被 @", () => {
     const mention: MentionPayload = {
       entities: [{ uid: "bot_uid", offset: 0, length: 4 }],
     };
@@ -865,7 +867,7 @@ describe("Bot @ detection (entities support)", () => {
     expect(mentionUids.includes("bot_uid")).toBe(true);
   });
 
-  it("should fallback to uids when entities are invalid", () => {
+  it("entities 无效时应从 uids 检测", () => {
     const mention: MentionPayload = {
       entities: [{} as any],
       uids: ["bot_uid"],

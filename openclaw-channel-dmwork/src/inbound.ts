@@ -8,10 +8,11 @@ import { DEFAULT_HISTORY_PROMPT_TEMPLATE } from "./config-schema.js";
 import {
   extractMentionMatches,
   extractMentionUids,
+  convertContentForLLM,
+  buildSenderPrefix,
   parseStructuredMentions,
   convertStructuredMentions,
   buildEntitiesFromFallback,
-  convertContentForLLM,
 } from "./mention-utils.js";
 import type { MentionPayload, MentionEntity } from "./types.js";
 import { registerGroupAccount, ensureGroupMd, handleGroupMdEvent, broadcastGroupMdUpdate } from "./group-md.js";
@@ -832,79 +833,6 @@ function findUidByName(name: string, memberMap: Map<string, string>): string | u
   return undefined;
 }
 
-/**
- * Learn uid ↔ displayName mappings from a message.
- *
- * Sources:
- * 1. Sender info (fromUid + fromName)
- * 2. Entities precise mapping (v2 — substring @name from content)
- * 3. Uids + regex sequential pairing (v1 fallback)
- */
-export function learnMembersFromMessage(
-  content: string,
-  mention: MentionPayload | undefined,
-  fromUid: string,
-  fromName: string | undefined,
-  memberByUid: Map<string, string>,
-  memberMap: Map<string, string>,
-): void {
-  // Learn from sender
-  if (fromUid && fromName) {
-    memberByUid.set(fromUid, fromName);
-    memberMap.set(fromName, fromUid);
-  }
-
-  if (!mention) return;
-
-  // Try learning from entities
-  if (mention.entities && Array.isArray(mention.entities)) {
-    let learned = 0;
-    for (const entity of mention.entities) {
-      if (
-        !entity ||
-        typeof entity !== "object" ||
-        Array.isArray(entity)
-      )
-        continue;
-      if (
-        typeof entity.uid !== "string" ||
-        typeof entity.offset !== "number" ||
-        typeof entity.length !== "number"
-      )
-        continue;
-      if (entity.offset < 0 || entity.offset + entity.length > content.length)
-        continue;
-
-      const raw = content.substring(
-        entity.offset,
-        entity.offset + entity.length,
-      );
-      if (!raw.startsWith("@")) continue;
-
-      const name = raw.substring(1);
-      memberByUid.set(entity.uid, name);
-      memberMap.set(name, entity.uid);
-      learned++;
-    }
-    // Only return if we learned valid members; otherwise fall through to uids
-    if (learned > 0) return;
-  }
-
-  // Fallback: uids + regex sequential pairing
-  if (mention.uids && Array.isArray(mention.uids) && mention.uids.length > 0) {
-    const contentMentions = extractMentionMatches(content);
-    const pairCount = Math.min(contentMentions.length, mention.uids.length);
-    for (let i = 0; i < pairCount; i++) {
-      const displayName = contentMentions[i].slice(1);
-      const uid = mention.uids[i];
-      if (typeof uid === "string" && displayName) {
-        memberByUid.set(uid, displayName);
-        memberMap.set(displayName, uid);
-      }
-    }
-  }
-}
-
 // Cache expiry time: 1 hour
 const GROUP_CACHE_EXPIRY_MS = 60 * 60 * 1000;
 
@@ -969,6 +897,78 @@ async function refreshGroupMemberCache(opts: {
     groupCacheTimestamps.set(sessionId, now - GROUP_CACHE_EXPIRY_MS + 30000);
     log?.error?.(`dmwork: [CACHE] Failed to fetch group members: ${err}, backoff 30s`);
     return false;
+  }
+}
+
+/**
+ * 从消息中学习 uid ↔ displayName 映射关系。
+ *
+ * 学习来源：
+ * 1. sender 信息（from_uid + from_name）
+ * 2. entities 精确映射（v2 —— 从 content 中 substring 出 @name）
+ * 3. uids + 正则顺序配对（v1 fallback）
+ */
+export function learnMembersFromMessage(
+  content: string,
+  mention: MentionPayload | undefined,
+  fromUid: string,
+  fromName: string | undefined,
+  memberByUid: Map<string, string>,
+  memberMap: Map<string, string>,
+): void {
+  // 从 sender 学习
+  if (fromUid && fromName) {
+    memberByUid.set(fromUid, fromName);
+    memberMap.set(fromName, fromUid);
+  }
+
+  if (!mention) return;
+
+  // 尝试从 entities 学习
+  if (mention.entities && Array.isArray(mention.entities)) {
+    let learned = 0;
+    for (const entity of mention.entities) {
+      if (
+        !entity ||
+        typeof entity !== "object" ||
+        Array.isArray(entity)
+      )
+        continue;
+      if (
+        typeof entity.uid !== "string" ||
+        typeof entity.offset !== "number" ||
+        typeof entity.length !== "number"
+      )
+        continue;
+      if (entity.offset < 0 || entity.offset + entity.length > content.length)
+        continue;
+
+      const raw = content.substring(
+        entity.offset,
+        entity.offset + entity.length,
+      );
+      if (!raw.startsWith("@")) continue;
+
+      const name = raw.substring(1);
+      memberByUid.set(entity.uid, name);
+      memberMap.set(name, entity.uid);
+      learned++;
+    }
+    if (learned > 0) return;
+  }
+
+  // fallback: uids + 正则顺序配对
+  if (mention.uids && Array.isArray(mention.uids) && mention.uids.length > 0) {
+    const contentMentions = extractMentionMatches(content);
+    const pairCount = Math.min(contentMentions.length, mention.uids.length);
+    for (let i = 0; i < pairCount; i++) {
+      const displayName = contentMentions[i].slice(1);
+      const uid = mention.uids[i];
+      if (typeof uid === "string" && displayName) {
+        memberByUid.set(uid, displayName);
+        memberMap.set(displayName, uid);
+      }
+    }
   }
 }
 
@@ -1163,15 +1163,17 @@ export async function handleInboundMessage(params: {
     await refreshGroupMemberCache({ sessionId, memberMap, uidToNameMap, groupCacheTimestamps, apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", log });
   }
 
-  // Learn uid ↔ displayName mappings from message (entities-aware with uids fallback)
+  // Build displayName ↔ uid mapping from message content + mention (entities or uids)
+  // v2: entities provide precise uid+offset+length, avoiding email false positives
+  // v1 fallback: regex-match @names from content, pair positionally with mention.uids
   if (isGroup) {
     learnMembersFromMessage(
       rawBody,
       message.payload?.mention,
       message.from_uid,
       uidToNameMap.get(message.from_uid),
-      uidToNameMap,   // memberByUid: uid → displayName
-      memberMap,      // memberMap: displayName → uid
+      uidToNameMap,
+      memberMap,
     );
   }
 
@@ -1273,15 +1275,12 @@ export async function handleInboundMessage(params: {
     // to Core (they are remote URLs; only local paths should go through MediaUrls)
     if (entries.length > 0) {
       const messagesJson = JSON.stringify(entries.map((e: any) => {
-        // Convert @name to @[uid:name] for LLM comprehension
+        // Convert @name → @[uid:name] for LLM context
         const bodyForLLM = e.mention
           ? convertContentForLLM(e.body, e.mention)
           : e.body;
-
-        // Sender format: displayName(uid)
-        const senderName = uidToNameMap.get(e.sender);
-        const senderLabel = senderName ? `${senderName}(${e.sender})` : e.sender;
-
+        // sender format: displayName(uid)
+        const senderLabel = buildSenderPrefix(e.sender, uidToNameMap);
         return {
           sender: senderLabel,
           body: bodyForLLM,
@@ -1356,7 +1355,7 @@ export async function handleInboundMessage(params: {
     sessionKey: route.sessionKey,
   });
 
-  // Inject recent group members to help LLM learn @[uid:name] format
+  // Inject member list for group messages to help LLM learn @[uid:name] format
   let memberListPrefix = "";
   if (isGroup && uidToNameMap.size > 0) {
     const recentMembers = Array.from(uidToNameMap.entries()).slice(0, 50);
@@ -1518,16 +1517,17 @@ export async function handleInboundMessage(params: {
         }
         if (!content) return;
 
-        let finalContent = content;
+        // Build mentionUids + entities from @mentions in content
+        // Supports both @[uid:name] (v2 structured) and @name (v1 fallback)
         let replyMentionUids: string[] = [];
         let replyMentionEntities: MentionEntity[] = [];
+        let finalContent = content;
 
         if (isGroup) {
-          // Check for structured @[uid:name] mentions first
           const structuredMentions = parseStructuredMentions(content);
 
           if (structuredMentions.length > 0) {
-            // LLM used @[uid:name] format
+            // v2 path: LLM used @[uid:name] format
             const validUids = new Set(uidToNameMap.keys());
             const converted = convertStructuredMentions(
               content,
@@ -1537,7 +1537,7 @@ export async function handleInboundMessage(params: {
             finalContent = converted.content;
             replyMentionEntities = [...converted.entities];
 
-            // Mixed scenario: check for remaining plain @name in converted content
+            // Mixed scenario: check for remaining @name in converted content
             const remaining = buildEntitiesFromFallback(finalContent, memberMap);
             const existingOffsets = new Set(replyMentionEntities.map((e) => e.offset));
             for (const rm of remaining.entities) {
@@ -1550,10 +1550,9 @@ export async function handleInboundMessage(params: {
               `dmwork: [REPLY] structured mentions: ${structuredMentions.length}, fallback: ${remaining.entities.length}`,
             );
           } else {
-            // No structured mentions — use existing resolveMention logic for fallback
+            // v1 fallback path: LLM used @name format
+            // Keep existing resolveMention logic for hex uid / uid-format handling
             const contentMentions = extractMentionMatches(content);
-
-            log?.debug?.(`dmwork: [REPLY] content @mentions count: ${contentMentions.length}`);
 
             let unresolvedNames: { name: string; index: number }[] = [];
 
@@ -1568,20 +1567,17 @@ export async function handleInboundMessage(params: {
                 if (displayName) {
                   newContent = newContent.replace(`@${name}`, `@${displayName}`);
                   return { uid: name, newContent };
-                } else {
-                  return { uid: name, newContent };
                 }
+                return { uid: name, newContent };
               } else if (/^[a-zA-Z0-9_]+$/.test(name)) {
                 const displayName = uidToNameMap.get(name);
                 if (displayName) {
                   newContent = newContent.replace(`@${name}`, `@${displayName}`);
                   return { uid: name, newContent };
-                } else {
-                  return { uid: name, newContent };
                 }
-              } else {
-                return { uid: null, newContent };
+                return { uid: name, newContent };
               }
+              return { uid: null, newContent };
             };
 
             const resolvedUids: (string | null)[] = [];
@@ -1609,15 +1605,12 @@ export async function handleInboundMessage(params: {
             }
 
             replyMentionUids = resolvedUids.filter((uid): uid is string => uid !== null);
-
-            // Build entities from fallback for the resolved content
-            if (replyMentionUids.length > 0) {
-              const fallbackResult = buildEntitiesFromFallback(finalContent, memberMap);
-              replyMentionEntities = fallbackResult.entities;
-            }
+            // Build entities from fallback for the final content
+            const fallbackResult = buildEntitiesFromFallback(finalContent, memberMap);
+            replyMentionEntities = fallbackResult.entities;
           }
 
-          // Sort entities by offset and rebuild uids to ensure consistency
+          // Sort entities by offset and rebuild uids from sorted entities
           if (replyMentionEntities.length > 0) {
             replyMentionEntities.sort((a, b) => a.offset - b.offset);
             replyMentionUids = replyMentionEntities.map((e) => e.uid);

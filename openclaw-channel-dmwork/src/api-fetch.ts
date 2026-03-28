@@ -190,7 +190,7 @@ export async function sendMessage(params: {
     type: MessageType.Text,
     content: params.content,
   };
-  // Add mention field if any UIDs/entities specified or mentionAll
+  // Add mention field if any UIDs specified, entities present, or mentionAll
   if (
     (params.mentionUids && params.mentionUids.length > 0) ||
     (params.mentionEntities && params.mentionEntities.length > 0) ||

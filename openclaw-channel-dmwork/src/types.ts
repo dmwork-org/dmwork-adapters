@@ -48,15 +48,15 @@ export interface BotMessage {
 }
 
 /**
- * Single mention with precise position in content.
- * offset/length units are UTF-16 code units (same as JS string.length).
+ * 单个 mention 的精确位置描述。
+ * offset/length 的单位为 UTF-16 code units（与 JS string.length 一致）。
  */
 export interface MentionEntity {
-  /** Target user's unique identifier */
+  /** 被 @ 用户的唯一标识符 */
   uid: string;
-  /** Start position of @name in content (including @) */
+  /** @name 在 content 中的起始位置（包括 @ 符号） */
   offset: number;
-  /** Full length of @name (including @) */
+  /** @name 的完整长度（包括 @ 符号） */
   length: number;
 }
 

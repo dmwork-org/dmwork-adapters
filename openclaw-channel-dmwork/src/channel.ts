@@ -665,8 +665,9 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       // 4d. Group cache timestamps — track when each group's members were last fetched
       const groupCacheTimestamps = getOrCreateGroupCacheTimestamps(account.accountId);
 
-      // 5. Token refresh state — detect stale cached token
-      let hasRefreshedToken = false;
+      // 5. Token refresh state — time-based cooldown to prevent refresh storms
+      let lastTokenRefreshAt = 0;
+      const TOKEN_REFRESH_COOLDOWN_MS = 60_000; // 60 seconds
       let isRefreshingToken = false; // Guard against concurrent refreshes (#43)
 
       // 5b. Heartbeat failure tracking — reconnect after consecutive failures (#42)
@@ -742,9 +743,6 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           log?.info?.(`dmwork: WebSocket connected to ${wsUrl}`);
           statusSink({ lastError: null });
           startHeartbeat();
-          // WS connected successfully = WuKongIM accepted the token
-          // Reset refresh flag so we can refresh again if kicked later (#92)
-          hasRefreshedToken = false;
         },
 
         onDisconnected: () => {
@@ -756,12 +754,14 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           log?.error?.(`dmwork: WebSocket error: ${err.message}`);
           statusSink({ lastError: err.message });
 
-          // If kicked or connect failed, try refreshing the IM token once
+          // If kicked or connect failed, try refreshing the IM token with a cooldown
+          // to prevent refresh storms (e.g. 9000+ refreshes across 11 bots).
           // Use isRefreshingToken to prevent concurrent refresh attempts (#43)
-          if (!hasRefreshedToken && !isRefreshingToken && !stopped &&
+          const cooldownElapsed = Date.now() - lastTokenRefreshAt > TOKEN_REFRESH_COOLDOWN_MS;
+          if (cooldownElapsed && !isRefreshingToken && !stopped &&
               (err.message.includes("Kicked") || err.message.includes("Connect failed"))) {
             isRefreshingToken = true;
-            hasRefreshedToken = true;
+            lastTokenRefreshAt = Date.now();
             log?.warn?.("dmwork: connection rejected — refreshing IM token...");
             try {
               const fresh = await registerBot({
@@ -773,10 +773,16 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
               log?.info?.("dmwork: got fresh IM token, reconnecting WS...");
               socket.disconnect();
               socket.updateCredentials(fresh.robot_id, fresh.im_token);
+              // Stagger reconnect to avoid thundering herd when multiple bots
+              // refresh tokens simultaneously after server-wide token expiry
+              const staggerMs = Math.floor(Math.random() * 5000);
+              log?.info?.(`dmwork: staggering reconnect by ${staggerMs}ms`);
+              await new Promise(r => setTimeout(r, staggerMs));
+              if (stopped) return; // account was stopped during stagger delay
               socket.connect();
             } catch (refreshErr) {
               log?.error?.(`dmwork: token refresh failed: ${String(refreshErr)}`);
-              hasRefreshedToken = false; // Allow retry on next error (#43)
+              // Keep cooldown active even on failure to prevent rapid retry hammering
             } finally {
               isRefreshingToken = false;
             }

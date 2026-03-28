@@ -168,9 +168,9 @@ async function handleSend(params: {
     let mentionEntities: MentionEntity[] = [];
 
     if (channelType === ChannelType.Group && memberMap) {
-      const result = buildEntitiesFromFallback(message, memberMap);
-      mentionUids = result.uids;
-      mentionEntities = result.entities;
+      const { entities, uids } = buildEntitiesFromFallback(message, memberMap);
+      mentionUids = uids;
+      mentionEntities = entities;
     }
 
     await sendMessage({
