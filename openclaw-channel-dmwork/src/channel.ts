@@ -670,7 +670,10 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       const TOKEN_REFRESH_COOLDOWN_MS = 60_000; // 60 seconds
       let isRefreshingToken = false; // Guard against concurrent refreshes (#43)
 
-      // 5b. Heartbeat failure tracking — reconnect after consecutive failures (#42)
+      // 5b. Cooldown reconnect timer — deduplicate to prevent self-kick storms (#139)
+      let cooldownReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+      // 5c. Heartbeat failure tracking — reconnect after consecutive failures (#42)
       let consecutiveHeartbeatFailures = 0;
       const MAX_HEARTBEAT_FAILURES = 3;
 
@@ -788,11 +791,17 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
             }
           } else if (!isRefreshingToken && !stopped &&
               (err.message.includes("Kicked") || err.message.includes("Connect failed"))) {
-            // Cooldown active — skip token refresh but still reconnect with current credentials
+            // Cooldown active — skip token refresh but still reconnect with current credentials.
+            // Deduplicate: clear any pending cooldown reconnect timer to prevent self-kick storms
+            // where multiple setTimeout callbacks fire simultaneously, each calling connect(),
+            // causing the same bot to have multiple WS connections that kick each other (#139).
+            if (cooldownReconnectTimer) {
+              clearTimeout(cooldownReconnectTimer);
+            }
             log?.warn?.("dmwork: cooldown active, scheduling reconnect with current credentials...");
-            // Use backoff delay to avoid tight loop when persistently kicked
             const backoffMs = 5000 + Math.floor(Math.random() * 5000);
-            setTimeout(() => {
+            cooldownReconnectTimer = setTimeout(() => {
+              cooldownReconnectTimer = null;
               if (!stopped) {
                 socket.disconnect();
                 socket.connect();
@@ -811,6 +820,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           stopped = true;
           socket.disconnect();
           if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+          if (cooldownReconnectTimer) { clearTimeout(cooldownReconnectTimer); cooldownReconnectTimer = null; }
           ctx.setStatus({
             accountId: account.accountId,
             running: false,
