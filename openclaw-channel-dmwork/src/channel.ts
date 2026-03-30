@@ -445,7 +445,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         tempPath = dl.tempPath;
         localFilePath = dl.tempPath;
         contentType = dl.contentType;
-        if (!contentType) contentType = inferContentType(filename);
+        if (!contentType || contentType === "application/octet-stream") contentType = inferContentType(filename);
         const st = statSync(tempPath);
         fileBody = createReadStream(tempPath);
         fileSize = st.size;
