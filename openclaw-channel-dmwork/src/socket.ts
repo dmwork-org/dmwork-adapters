@@ -261,6 +261,9 @@ export class WKSocket extends EventEmitter {
   private pingRetryCount = 0;
   private readonly pingMaxRetry = 3;
   private reconnectAttempts = 0;
+  private stableTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastConnectTime = 0;
+  private rapidDisconnectCount = 0;
 
   // Per-instance crypto state (set after CONNACK)
   private aesKey = "";
@@ -291,8 +294,11 @@ export class WKSocket extends EventEmitter {
   disconnect(): void {
     this.needReconnect = false;
     this.connected = false;
+    this.lastConnectTime = 0;
+    this.rapidDisconnectCount = 0;
     this.stopHeart();
     this.stopReconnectTimer();
+    this.clearStableTimer();
     if (this.ws) {
       try { this.ws.close(); } catch { /* ignore */ }
       this.ws = null;
@@ -302,6 +308,7 @@ export class WKSocket extends EventEmitter {
   // ─── Internal Connection Logic ──────────────────────────────────────────
 
   private doConnect(): void {
+    this.clearStableTimer();
     if (this.ws) {
       try { this.ws.close(); } catch { /* ignore */ }
       this.ws = null;
@@ -349,6 +356,27 @@ export class WKSocket extends EventEmitter {
         this.opts.onDisconnected?.();
       }
       this.stopHeart();
+      this.clearStableTimer();
+
+      // Track rapid disconnects: if connection lasted <5s, it's unstable
+      if (this.lastConnectTime > 0) {
+        const duration = Date.now() - this.lastConnectTime;
+        if (duration < 5000) {
+          this.rapidDisconnectCount++;
+        } else {
+          this.rapidDisconnectCount = 0;
+        }
+        this.lastConnectTime = 0;
+      }
+
+      // If 3+ consecutive rapid disconnects, trigger onError for token refresh
+      if (this.rapidDisconnectCount >= 3) {
+        this.needReconnect = false;
+        this.rapidDisconnectCount = 0;
+        this.opts.onError?.(new Error("Connect failed: rapid disconnect detected"));
+        return;
+      }
+
       if (this.needReconnect) {
         this.scheduleReconnect();
       }
@@ -383,6 +411,23 @@ export class WKSocket extends EventEmitter {
     }
   }
 
+  private startStableTimer(): void {
+    this.clearStableTimer();
+    this.stableTimer = setTimeout(() => {
+      if (this.connected) {
+        this.reconnectAttempts = 0;
+        this.rapidDisconnectCount = 0;
+      }
+    }, 30_000);
+  }
+
+  private clearStableTimer(): void {
+    if (this.stableTimer) {
+      clearTimeout(this.stableTimer);
+      this.stableTimer = null;
+    }
+  }
+
   // ─── Heartbeat ──────────────────────────────────────────────────────────
 
   private restartHeart(): void {
@@ -393,6 +438,7 @@ export class WKSocket extends EventEmitter {
       if (this.pingRetryCount > this.pingMaxRetry) {
         console.debug("[WKSocket] ping timeout, reconnecting...");
         this.stopHeart();
+        this.clearStableTimer();
         if (this.ws) {
           try { this.ws.close(); } catch { /* ignore */ }
           this.ws = null;
@@ -552,8 +598,9 @@ export class WKSocket extends EventEmitter {
       this.aesIV = salt && salt.length > 16 ? salt.substring(0, 16) : salt;
 
       this.connected = true;
-      this.reconnectAttempts = 0;
+      this.lastConnectTime = Date.now();
       this.restartHeart();
+      this.startStableTimer();
       this.opts.onConnected?.();
     } else if (reasonCode === 0) {
       // Kicked
@@ -629,6 +676,7 @@ export class WKSocket extends EventEmitter {
     this.connected = false;
     this.needReconnect = false;
     this.stopHeart();
+    this.clearStableTimer();
     this.opts.onError?.(new Error("Kicked by server"));
     this.opts.onDisconnected?.();
   }

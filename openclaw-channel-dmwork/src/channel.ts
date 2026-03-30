@@ -786,6 +786,18 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
             } finally {
               isRefreshingToken = false;
             }
+          } else if (!isRefreshingToken && !stopped &&
+              (err.message.includes("Kicked") || err.message.includes("Connect failed"))) {
+            // Cooldown active — skip token refresh but still reconnect with current credentials
+            log?.warn?.("dmwork: cooldown active, scheduling reconnect with current credentials...");
+            // Use backoff delay to avoid tight loop when persistently kicked
+            const backoffMs = 5000 + Math.floor(Math.random() * 5000);
+            setTimeout(() => {
+              if (!stopped) {
+                socket.disconnect();
+                socket.connect();
+              }
+            }, backoffMs);
           }
         },
       });
