@@ -120,6 +120,17 @@ export function inferContentType(filename: string): string {
 }
 
 /**
+ * Ensure text/* content types include a charset parameter.
+ * If the content type starts with "text/" and has no charset, appends "; charset=utf-8".
+ */
+export function ensureTextCharset(contentType: string): string {
+  if (contentType.startsWith("text/") && !contentType.includes("charset")) {
+    return contentType + "; charset=utf-8";
+  }
+  return contentType;
+}
+
+/**
  * Parse image dimensions from buffer (PNG/JPEG/GIF/WebP).
  * Lightweight — reads only the header bytes, no external dependencies.
  */
@@ -577,6 +588,7 @@ export async function uploadFileToCOS(params: {
     Region: params.region,
     Key: params.key,
     Body: params.fileBody,
+    ContentType: params.contentType,
   };
   if (params.fileSize != null) {
     putParams.ContentLength = params.fileSize;
