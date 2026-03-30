@@ -114,7 +114,10 @@ export function inferContentType(filename: string): string {
     ".pdf": "application/pdf", ".zip": "application/zip",
     ".doc": "application/msword", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".xls": "application/vnd.ms-excel", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ".txt": "text/plain", ".json": "application/json",
+    ".txt": "text/plain", ".md": "text/markdown", ".markdown": "text/markdown",
+    ".csv": "text/csv", ".html": "text/html", ".htm": "text/html",
+    ".css": "text/css", ".xml": "text/xml", ".yaml": "text/yaml", ".yml": "text/yaml",
+    ".json": "application/json",
   };
   return map[ext] ?? "application/octet-stream";
 }
