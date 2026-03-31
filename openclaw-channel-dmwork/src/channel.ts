@@ -646,6 +646,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
             if (consecutiveHeartbeatFailures >= MAX_HEARTBEAT_FAILURES && !stopped) {
               log?.warn?.("dmwork: too many heartbeat failures, triggering reconnect...");
               consecutiveHeartbeatFailures = 0;
+              if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
               const backoffMs = 3000 + Math.floor(Math.random() * 2000);
               await new Promise(r => setTimeout(r, backoffMs));
               if (stopped) return;

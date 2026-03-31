@@ -346,7 +346,7 @@ describe("reconnect fixes", () => {
   // ─── Fix #5: Token refresh disconnects before API call ────────────────
 
   describe("#5 — token refresh disconnects before API call", () => {
-    it("should call disconnectAndWait before registerBot in refresh path", () => {
+    it("should call disconnectAndWait before registerBot in refresh path", async () => {
       // Verify the ordering pattern: disconnect -> refresh -> connect
       const callOrder: string[] = [];
 
@@ -362,19 +362,19 @@ describe("reconnect fixes", () => {
       };
 
       // Simulate the token refresh path
-      (async () => {
+      await (async () => {
         await mockSocket.disconnectAndWait();
         const fresh = await mockRegisterBot();
         mockSocket.updateCredentials();
         mockSocket.connect();
-      })().then(() => {
-        expect(callOrder).toEqual([
-          "disconnectAndWait",
-          "registerBot",
-          "updateCredentials",
-          "connect",
-        ]);
-      });
+      })();
+
+      expect(callOrder).toEqual([
+        "disconnectAndWait",
+        "registerBot",
+        "updateCredentials",
+        "connect",
+      ]);
     });
   });
 
@@ -491,7 +491,7 @@ describe("reconnect fixes", () => {
       expect(typeof socket.stopReconnectTimer).toBe("function");
     });
 
-    it("cooldown path should cancel socket reconnect before calling connect", () => {
+    it("cooldown path should cancel socket reconnect before calling connect", async () => {
       // Verify the pattern: stopReconnectTimer() called before connect()
       const callOrder: string[] = [];
       const mockSocket = {
@@ -501,17 +501,17 @@ describe("reconnect fixes", () => {
       };
 
       // Simulate cooldown reconnect path
-      (async () => {
+      await (async () => {
         await mockSocket.disconnectAndWait();
         mockSocket.stopReconnectTimer();
         mockSocket.connect();
-      })().then(() => {
-        expect(callOrder).toEqual([
-          "disconnectAndWait",
-          "stopReconnectTimer",
-          "connect",
-        ]);
-      });
+      })();
+
+      expect(callOrder).toEqual([
+        "disconnectAndWait",
+        "stopReconnectTimer",
+        "connect",
+      ]);
     });
   });
 
