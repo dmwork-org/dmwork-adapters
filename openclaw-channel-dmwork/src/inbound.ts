@@ -1,5 +1,5 @@
 import type { ChannelLogSink, OpenClawConfig } from "openclaw/plugin-sdk";
-import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, sendMediaMessage, inferContentType, ensureTextCharset, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
+import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, sendMediaMessage, inferContentType, ensureTextCharset, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS, fetchUserInfo } from "./api-fetch.js";
 import type { ResolvedDmworkAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType } from "./types.js";
@@ -1318,6 +1318,23 @@ export async function handleInboundMessage(params: {
   // Inject GROUP.md as GroupSystemPrompt for group messages
   const groupSystemPrompt = isGroup && groupMdCache ? groupMdCache.get(message.channel_id!)?.content : undefined;
 
+  // Resolve sender display name — async fallback for DM users not in cache
+  let senderName = resolveSenderName(message.from_uid, uidToNameMap);
+  if (!senderName && !isGroup) {
+    // DM user not in any group cache — try backend user info API
+    const userInfo = await fetchUserInfo({
+      apiUrl: account.config.apiUrl,
+      botToken: account.config.botToken ?? "",
+      uid: message.from_uid,
+      log,
+    });
+    if (userInfo?.name) {
+      senderName = userInfo.name;
+      // Cache for future messages (avoid repeated API calls)
+      uidToNameMap.set(message.from_uid, userInfo.name);
+    }
+  }
+
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
     BodyForAgent: body,  // ← 关键！AI 实际读取的是这个字段！
@@ -1337,7 +1354,7 @@ export async function handleInboundMessage(params: {
     ChatType: isGroup ? "group" : "direct",
     ConversationLabel: fromLabel,
     SenderId: message.from_uid,
-    SenderName: resolveSenderName(message.from_uid, uidToNameMap),
+    SenderName: senderName,
     SenderUsername: message.from_uid,
     WasMentioned: isGroup ? isMentioned : undefined,
     MessageSid: String(message.message_id),
