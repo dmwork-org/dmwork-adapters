@@ -319,18 +319,14 @@ export function convertContentForLLM(
 // ── Sender prefix utility ────────────────────────────────────────────────────
 
 /**
- * Build a sender label in the format "displayName(uid)" for history context.
- * Falls back to just uid if no name is found.
- */
 /**
  * Extract the base uid from a space-prefixed uid.
  * "s14_abc123" → "abc123", "abc123" → "abc123"
  */
 export function extractBaseUid(uid: string): string {
-  if (uid.startsWith("s")) {
-    const idx = uid.indexOf("_");
-    if (idx > 0) return uid.substring(idx + 1);
-  }
+  // Space-prefixed format: s{digits}_{baseUid}
+  const match = uid.match(/^s(\d+)_(.+)$/);
+  if (match) return match[2];
   return uid;
 }
 

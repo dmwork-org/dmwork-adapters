@@ -506,6 +506,11 @@ describe("extractBaseUid", () => {
   it("returns uid unchanged for 's' without underscore", () => {
     expect(extractBaseUid("system")).toBe("system");
   });
+
+  it("does not strip non-numeric space prefix (e.g. service_bot)", () => {
+    expect(extractBaseUid("service_bot")).toBe("service_bot");
+    expect(extractBaseUid("support_team")).toBe("support_team");
+  });
 });
 
 describe("resolveSenderName", () => {
