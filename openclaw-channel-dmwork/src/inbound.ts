@@ -1322,16 +1322,22 @@ export async function handleInboundMessage(params: {
   let senderName = resolveSenderName(message.from_uid, uidToNameMap);
   if (!senderName && !isGroup) {
     // DM user not in any group cache — try backend user info API
-    const userInfo = await fetchUserInfo({
-      apiUrl: account.config.apiUrl,
-      botToken: account.config.botToken ?? "",
-      uid: message.from_uid,
-      log,
-    });
-    if (userInfo?.name) {
-      senderName = userInfo.name;
-      // Cache for future messages (avoid repeated API calls)
-      uidToNameMap.set(message.from_uid, userInfo.name);
+    // Skip if we already tried and failed (negative cache sentinel "")
+    const cached = uidToNameMap.get(message.from_uid);
+    if (cached === undefined) {
+      const userInfo = await fetchUserInfo({
+        apiUrl: account.config.apiUrl,
+        botToken: account.config.botToken ?? "",
+        uid: message.from_uid,
+        log,
+      });
+      if (userInfo?.name) {
+        senderName = userInfo.name;
+        uidToNameMap.set(message.from_uid, userInfo.name);
+      } else {
+        // Negative cache — prevent repeated API calls for unknown UIDs
+        uidToNameMap.set(message.from_uid, "");
+      }
     }
   }
 
