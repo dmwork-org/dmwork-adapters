@@ -640,13 +640,17 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
             botToken: account.config.botToken!,
           }).then(() => {
             consecutiveHeartbeatFailures = 0; // Reset on success
-          }).catch((err) => {
+          }).catch(async (err) => {
             consecutiveHeartbeatFailures++;
             log?.error?.(`dmwork: heartbeat failed (${consecutiveHeartbeatFailures}/${MAX_HEARTBEAT_FAILURES}): ${String(err)}`);
             if (consecutiveHeartbeatFailures >= MAX_HEARTBEAT_FAILURES && !stopped) {
               log?.warn?.("dmwork: too many heartbeat failures, triggering reconnect...");
               consecutiveHeartbeatFailures = 0;
-              socket.disconnect();
+              const backoffMs = 3000 + Math.floor(Math.random() * 2000);
+              await new Promise(r => setTimeout(r, backoffMs));
+              if (stopped) return;
+              await socket.disconnectAndWait();
+              socket.stopReconnectTimer();
               socket.connect();
             }
           });
@@ -745,11 +749,13 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         onConnected: () => {
           log?.info?.(`dmwork: WebSocket connected to ${wsUrl}`);
           statusSink({ lastError: null });
+          consecutiveHeartbeatFailures = 0;
           startHeartbeat();
         },
 
         onDisconnected: () => {
           log?.warn?.("dmwork: WebSocket disconnected, will reconnect...");
+          if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
           statusSink({ lastError: "disconnected" });
         },
 
@@ -767,6 +773,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
             lastTokenRefreshAt = Date.now();
             log?.warn?.("dmwork: connection rejected — refreshing IM token...");
             try {
+              await socket.disconnectAndWait();
               const fresh = await registerBot({
                 apiUrl: account.config.apiUrl,
                 botToken: account.config.botToken!,
@@ -774,7 +781,6 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
               });
               credentials = fresh;
               log?.info?.("dmwork: got fresh IM token, reconnecting WS...");
-              socket.disconnect();
               socket.updateCredentials(fresh.robot_id, fresh.im_token);
               // Stagger reconnect to avoid thundering herd when multiple bots
               // refresh tokens simultaneously after server-wide token expiry
@@ -800,10 +806,11 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
             }
             log?.warn?.("dmwork: cooldown active, scheduling reconnect with current credentials...");
             const backoffMs = 5000 + Math.floor(Math.random() * 5000);
-            cooldownReconnectTimer = setTimeout(() => {
+            cooldownReconnectTimer = setTimeout(async () => {
               cooldownReconnectTimer = null;
               if (!stopped) {
-                socket.disconnect();
+                await socket.disconnectAndWait();
+                socket.stopReconnectTimer();
                 socket.connect();
               }
             }, backoffMs);
