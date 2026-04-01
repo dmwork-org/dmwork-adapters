@@ -104,6 +104,7 @@ describe("handleAction multi-bot isolation", () => {
     const ctx = {
       accountId: "wrongBot",
       action: "send",
+      channel: "dmwork",
       params: { target: "group:group-001", text: "hello" },
       toolContext: { currentChannelId: "dmwork:group-001" },
       cfg: {
@@ -119,7 +120,7 @@ describe("handleAction multi-bot isolation", () => {
       log: { info: vi.fn() },
     };
 
-    await dmworkPlugin.actions!.handleAction(ctx);
+    await dmworkPlugin.actions!.handleAction!(ctx);
 
     // handleDmworkMessageAction should have been called with botA's token
     expect(handleDmworkMessageAction).toHaveBeenCalledWith(
@@ -142,6 +143,7 @@ describe("handleAction multi-bot isolation", () => {
     const ctx = {
       accountId: "botA",
       action: "send",
+      channel: "dmwork",
       params: { target: "group:group-001", text: "hello from A" },
       toolContext: { currentChannelId: "dmwork:group-001" },
       cfg: {
@@ -157,7 +159,7 @@ describe("handleAction multi-bot isolation", () => {
       log: { info: vi.fn() },
     };
 
-    await dmworkPlugin.actions!.handleAction(ctx);
+    await dmworkPlugin.actions!.handleAction!(ctx);
 
     // Should use botA's token (the caller's original accountId), NOT botB's
     expect(handleDmworkMessageAction).toHaveBeenCalledWith(
@@ -178,6 +180,7 @@ describe("handleAction multi-bot isolation", () => {
     const ctx = {
       accountId: "botA", // already correct
       action: "send",
+      channel: "dmwork",
       params: { target: "group:group-001", text: "hello" },
       toolContext: { currentChannelId: "dmwork:group-001" },
       cfg: {
@@ -192,7 +195,7 @@ describe("handleAction multi-bot isolation", () => {
       log: { info: vi.fn() },
     };
 
-    await dmworkPlugin.actions!.handleAction(ctx);
+    await dmworkPlugin.actions!.handleAction!(ctx);
 
     expect(handleDmworkMessageAction).toHaveBeenCalledWith(
       expect.objectContaining({ botToken: "tokenA" }),
