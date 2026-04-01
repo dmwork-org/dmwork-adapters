@@ -103,7 +103,7 @@ describe("handleAction multi-bot isolation", () => {
 
     const ctx = {
       accountId: "wrongBot",
-      action: "send",
+      action: "send" as const,
       channel: "dmwork",
       params: { target: "group:group-001", text: "hello" },
       toolContext: { currentChannelId: "dmwork:group-001" },
@@ -120,7 +120,7 @@ describe("handleAction multi-bot isolation", () => {
       log: { info: vi.fn() },
     };
 
-    await dmworkPlugin.actions!.handleAction!(ctx);
+    await dmworkPlugin.actions!.handleAction!(ctx as any);
 
     // handleDmworkMessageAction should have been called with botA's token
     expect(handleDmworkMessageAction).toHaveBeenCalledWith(
@@ -142,7 +142,7 @@ describe("handleAction multi-bot isolation", () => {
 
     const ctx = {
       accountId: "botA",
-      action: "send",
+      action: "send" as const,
       channel: "dmwork",
       params: { target: "group:group-001", text: "hello from A" },
       toolContext: { currentChannelId: "dmwork:group-001" },
@@ -159,7 +159,7 @@ describe("handleAction multi-bot isolation", () => {
       log: { info: vi.fn() },
     };
 
-    await dmworkPlugin.actions!.handleAction!(ctx);
+    await dmworkPlugin.actions!.handleAction!(ctx as any);
 
     // Should use botA's token (the caller's original accountId), NOT botB's
     expect(handleDmworkMessageAction).toHaveBeenCalledWith(
@@ -179,7 +179,7 @@ describe("handleAction multi-bot isolation", () => {
 
     const ctx = {
       accountId: "botA", // already correct
-      action: "send",
+      action: "send" as const,
       channel: "dmwork",
       params: { target: "group:group-001", text: "hello" },
       toolContext: { currentChannelId: "dmwork:group-001" },
@@ -195,7 +195,7 @@ describe("handleAction multi-bot isolation", () => {
       log: { info: vi.fn() },
     };
 
-    await dmworkPlugin.actions!.handleAction!(ctx);
+    await dmworkPlugin.actions!.handleAction!(ctx as any);
 
     expect(handleDmworkMessageAction).toHaveBeenCalledWith(
       expect.objectContaining({ botToken: "tokenA" }),
