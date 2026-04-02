@@ -127,3 +127,81 @@ describe("dmworkPlugin structure", () => {
     expect(dmworkPlugin.capabilities?.chatTypes).toContain("group");
   });
 });
+
+// ─── Group → Account mapping tests ──────────────────────────────────────────
+
+describe("resolveAccountForGroup — prefetch registration", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it("should register groups during startup prefetch", async () => {
+    const { registerGroupToAccount, resolveAccountForGroup } = await import("./channel.js");
+
+    // Simulate prefetch registration
+    registerGroupToAccount("group_abc", "acct_1");
+
+    // resolveAccountForGroup should now return the registered account
+    expect(resolveAccountForGroup("group_abc")).toBe("acct_1");
+  });
+});
+
+// ─── resolveOutboundAccountId tests ──────────────────────────────────────────
+
+describe("resolveOutboundAccountId", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it("should strip @uid suffix from group target and resolve account", async () => {
+    const { registerGroupToAccount, resolveOutboundAccountId } = await import("./channel.js");
+
+    registerGroupToAccount("abc", "acct_A");
+
+    // "group:abc@uid1,uid2" → should strip @uid1,uid2, resolve group "abc"
+    const result = resolveOutboundAccountId("group:abc@uid1,uid2", "fallback");
+    expect(result).toBe("acct_A");
+  });
+
+  it("should resolve plain group target without @suffix", async () => {
+    const { registerGroupToAccount, resolveOutboundAccountId } = await import("./channel.js");
+
+    registerGroupToAccount("abc", "acct_B");
+
+    const result = resolveOutboundAccountId("group:abc", "fallback");
+    expect(result).toBe("acct_B");
+  });
+
+  it("should return fallback for DM targets (no correction)", async () => {
+    const { resolveOutboundAccountId } = await import("./channel.js");
+
+    // DM target — resolveOutboundAccountId should not correct, return fallback
+    const result = resolveOutboundAccountId("user:some_uid", "fallback_acct");
+    expect(result).toBe("fallback_acct");
+  });
+});
+
+describe("outbound accountId correction pattern", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it("should use resolveAccountForGroup for group targets", async () => {
+    const { registerGroupToAccount, resolveAccountForGroup } = await import("./channel.js");
+    const { parseTarget } = await import("./actions.js");
+
+    registerGroupToAccount("group_xyz", "correct_acct");
+
+    const target = "group:group_xyz";
+    const { channelId, channelType } = parseTarget(target);
+
+    // Simulate the correction logic
+    let accountId = "wrong_acct";
+    if (channelType === 2) { // ChannelType.Group
+      const correct = resolveAccountForGroup(channelId);
+      if (correct) accountId = correct;
+    }
+
+    expect(accountId).toBe("correct_acct");
+  });
+});

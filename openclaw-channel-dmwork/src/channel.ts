@@ -222,6 +222,22 @@ async function checkForUpdates(
   }
 }
 
+/** Resolve correct accountId for outbound context using group→account mapping */
+export function resolveOutboundAccountId(ctxTo: string, fallbackAccountId: string): string {
+  let targetForParse = ctxTo;
+  if (ctxTo.startsWith("group:")) {
+    const groupPart = ctxTo.slice(6);
+    const atIdx = groupPart.indexOf("@");
+    if (atIdx >= 0) targetForParse = "group:" + groupPart.slice(0, atIdx);
+  }
+  const { channelId, channelType } = parseTarget(targetForParse, undefined, getKnownGroupIds());
+  if (channelType === ChannelType.Group) {
+    const correctAccountId = resolveAccountForGroup(channelId);
+    if (correctAccountId) return correctAccountId;
+  }
+  return fallbackAccountId;
+}
+
 const meta = {
   id: "dmwork",
   label: "DMWork",
@@ -336,9 +352,14 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
   outbound: {
     deliveryMode: "direct",
     sendText: async (ctx) => {
+      // Resolve correct accountId — framework may pass wrong one for multi-bot setups
+      const accountId = resolveOutboundAccountId(
+        ctx.to,
+        ctx.accountId ?? DEFAULT_ACCOUNT_ID,
+      );
       const account = resolveDmworkAccount({
         cfg: ctx.cfg as OpenClawConfig,
-        accountId: ctx.accountId ?? DEFAULT_ACCOUNT_ID,
+        accountId,
       });
       if (!account.config.botToken) {
         throw new Error("DMWork botToken is not configured");
@@ -368,9 +389,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
 
       if (channelType === ChannelType.Group) {
         // Resolve @name to uid via memberMap (fixes name-as-uid bug)
-        const accountMemberMap = getOrCreateMemberMap(
-          ctx.accountId ?? DEFAULT_ACCOUNT_ID,
-        );
+        const accountMemberMap = getOrCreateMemberMap(accountId);
         const { entities, uids } = buildEntitiesFromFallback(content, accountMemberMap);
         for (const uid of uids) {
           if (!mentionUids.includes(uid)) {
@@ -393,9 +412,14 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       return { channel: "dmwork", to: ctx.to, messageId: "" };
     },
     sendMedia: async (ctx) => {
+      // Resolve correct accountId — framework may pass wrong one for multi-bot setups
+      const accountId = resolveOutboundAccountId(
+        ctx.to,
+        ctx.accountId ?? DEFAULT_ACCOUNT_ID,
+      );
       const account = resolveDmworkAccount({
         cfg: ctx.cfg as OpenClawConfig,
-        accountId: ctx.accountId ?? DEFAULT_ACCOUNT_ID,
+        accountId,
       });
       if (!account.config.botToken) {
         throw new Error("DMWork botToken is not configured");
@@ -616,6 +640,9 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           let mdCount = 0;
           let memberCount = 0;
           for (const g of groups) {
+            // Register group → account mapping for outbound accountId resolution
+            registerGroupToAccount(g.group_no, account.accountId);
+
             // Prefetch GROUP.md
             try {
               const md = await getGroupMd({ apiUrl: account.config.apiUrl, botToken: account.config.botToken!, groupNo: g.group_no, log });
