@@ -200,7 +200,7 @@ export function buildEntitiesFromFallback(
     const name = match[1];
 
     // Skip @all / @All etc. — handled separately as mentionAll, not as entity
-    if (name.toLowerCase() === "all") continue;
+    if (name.toLowerCase() === "all" || name === "所有人") continue;
 
     let uid: string | undefined;
     let matchedName = name;

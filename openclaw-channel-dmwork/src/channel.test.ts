@@ -246,3 +246,141 @@ describe("outbound accountId correction pattern", () => {
     expect(accountId).toBe("correct_acct");
   });
 });
+
+// ─── @all / @所有人 hasAtAll regex tests ──────────────────────────────────────
+
+describe("hasAtAll regex — @所有人 support", () => {
+  const hasAtAllRegex = /(?:^|(?<=\s))@(?:all|所有人)(?=\s|[^\w]|$)/i;
+
+  it("should match @all", () => {
+    expect(hasAtAllRegex.test("hello @all please check")).toBe(true);
+  });
+
+  it("should match @All (case-insensitive)", () => {
+    expect(hasAtAllRegex.test("hello @All please")).toBe(true);
+  });
+
+  it("should match @所有人", () => {
+    expect(hasAtAllRegex.test("大家好 @所有人 请注意")).toBe(true);
+  });
+
+  it("should match @所有人 at start of string", () => {
+    expect(hasAtAllRegex.test("@所有人 请注意")).toBe(true);
+  });
+
+  it("should match @all at start of string", () => {
+    expect(hasAtAllRegex.test("@all check this")).toBe(true);
+  });
+
+  it("should match @所有人 at end of string", () => {
+    expect(hasAtAllRegex.test("通知 @所有人")).toBe(true);
+  });
+
+  it("should NOT match @Alice (not all)", () => {
+    expect(hasAtAllRegex.test("hello @Alice")).toBe(false);
+  });
+
+  it("should NOT match email with @all in domain", () => {
+    expect(hasAtAllRegex.test("email user@all.com")).toBe(false);
+  });
+});
+
+// ─── sendText v2 structured mention handling (unit logic) ─────────────────────
+
+describe("sendText v2 mention processing logic", () => {
+  it("should convert @[uid:name] to @name + entities", async () => {
+    const { parseStructuredMentions, convertStructuredMentions, buildEntitiesFromFallback } = await import("./mention-utils.js");
+
+    const content = "请 @[abc123:张三] 确认";
+    const uidToNameMap = new Map([["abc123", "张三"]]);
+    const memberMap = new Map([["张三", "abc123"]]);
+    const validUids = new Set(uidToNameMap.keys());
+
+    // v2 path
+    const structuredMentions = parseStructuredMentions(content);
+    expect(structuredMentions).toHaveLength(1);
+
+    const converted = convertStructuredMentions(content, structuredMentions, validUids);
+    expect(converted.content).toBe("请 @张三 确认");
+    expect(converted.entities).toHaveLength(1);
+    expect(converted.entities[0]).toEqual({ uid: "abc123", offset: 2, length: 3 });
+    expect(converted.uids).toEqual(["abc123"]);
+
+    // v1 fallback on converted content should find @张三 but not create duplicate
+    const fallback = buildEntitiesFromFallback(converted.content, memberMap);
+    expect(fallback.uids).toEqual(["abc123"]);
+  });
+
+  it("should handle mixed v2 + v1 mentions", async () => {
+    const { parseStructuredMentions, convertStructuredMentions, buildEntitiesFromFallback } = await import("./mention-utils.js");
+
+    const content = "@[abc:张三] 和 @李四";
+    const uidToNameMap = new Map([["abc", "张三"]]);
+    const memberMap = new Map([["张三", "abc"], ["李四", "def"]]);
+    const validUids = new Set(uidToNameMap.keys());
+
+    // v2 path
+    const structuredMentions = parseStructuredMentions(content);
+    expect(structuredMentions).toHaveLength(1);
+
+    const converted = convertStructuredMentions(content, structuredMentions, validUids);
+    expect(converted.content).toBe("@张三 和 @李四");
+
+    // v1 fallback resolves @李四
+    const fallback = buildEntitiesFromFallback(converted.content, memberMap);
+
+    // Merge with dedup
+    const mentionEntities = [...converted.entities];
+    const existingOffsets = new Set(mentionEntities.map(e => e.offset));
+    for (const entity of fallback.entities) {
+      if (!existingOffsets.has(entity.offset)) {
+        mentionEntities.push(entity);
+      }
+    }
+
+    expect(mentionEntities).toHaveLength(2);
+    expect(mentionEntities.map(e => e.uid).sort()).toEqual(["abc", "def"]);
+  });
+
+  it("pure v1 content should work unchanged", async () => {
+    const { parseStructuredMentions, buildEntitiesFromFallback } = await import("./mention-utils.js");
+
+    const content = "@张三 你好";
+    const structuredMentions = parseStructuredMentions(content);
+    expect(structuredMentions).toHaveLength(0);
+
+    const memberMap = new Map([["张三", "abc"]]);
+    const fallback = buildEntitiesFromFallback(content, memberMap);
+    expect(fallback.uids).toEqual(["abc"]);
+    expect(fallback.entities).toHaveLength(1);
+  });
+
+  it("@[uid:name] with @所有人 should only produce entity for name, not 所有人", async () => {
+    const { parseStructuredMentions, convertStructuredMentions, buildEntitiesFromFallback } = await import("./mention-utils.js");
+
+    const content = "@[abc:张三] @所有人";
+    const validUids = new Set(["abc"]);
+    const memberMap = new Map([["张三", "abc"]]);
+
+    const structured = parseStructuredMentions(content);
+    const converted = convertStructuredMentions(content, structured, validUids);
+    expect(converted.content).toBe("@张三 @所有人");
+
+    const fallback = buildEntitiesFromFallback(converted.content, memberMap);
+    // @所有人 should be skipped by buildEntitiesFromFallback
+    const allEntities = [...converted.entities];
+    const existingOffsets = new Set(allEntities.map(e => e.offset));
+    for (const entity of fallback.entities) {
+      if (!existingOffsets.has(entity.offset)) {
+        allEntities.push(entity);
+      }
+    }
+    // Only 张三 should have an entity
+    expect(allEntities).toHaveLength(1);
+    expect(allEntities[0].uid).toBe("abc");
+
+    // hasAtAll should be true
+    const hasAtAll = /(?:^|(?<=\s))@(?:all|所有人)(?=\s|[^\w]|$)/i.test(converted.content);
+    expect(hasAtAll).toBe(true);
+  });
+});

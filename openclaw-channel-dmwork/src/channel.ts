@@ -15,7 +15,7 @@ import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContent
 import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
-import { buildEntitiesFromFallback } from "./mention-utils.js";
+import { buildEntitiesFromFallback, parseStructuredMentions, convertStructuredMentions } from "./mention-utils.js";
 import type { MentionEntity } from "./types.js";
 import { handleDmworkMessageAction, parseTarget } from "./actions.js";
 import { createDmworkManagementTools } from "./agent-tools.js";
@@ -352,12 +352,11 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
   outbound: {
     deliveryMode: "direct",
     sendText: async (ctx) => {
-      // Resolve correct accountId — only correct when framework passes default
-      // (i.e. no explicit accountId). If user explicitly specified an accountId, respect it.
-      const rawAccountId = ctx.accountId ?? DEFAULT_ACCOUNT_ID;
-      const accountId = (rawAccountId === DEFAULT_ACCOUNT_ID)
-        ? resolveOutboundAccountId(ctx.to, rawAccountId)
-        : rawAccountId;
+      // Resolve correct accountId — framework may pass wrong one for multi-bot setups
+      const accountId = resolveOutboundAccountId(
+        ctx.to,
+        ctx.accountId ?? DEFAULT_ACCOUNT_ID,
+      );
       const account = resolveDmworkAccount({
         cfg: ctx.cfg as OpenClawConfig,
         accountId,
@@ -387,28 +386,50 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       const { channelId, channelType } = parseTarget(targetForParse, undefined, getKnownGroupIds());
 
       let mentionEntities: MentionEntity[] = [];
+      let finalContent = content;
 
       if (channelType === ChannelType.Group) {
-        // Resolve @name to uid via memberMap (fixes name-as-uid bug)
         const accountMemberMap = getOrCreateMemberMap(accountId);
-        const { entities, uids } = buildEntitiesFromFallback(content, accountMemberMap);
+        const uidToNameMap = getOrCreateUidToNameMap(accountId);
+
+        // v2 path: convert @[uid:name] → @name + entities
+        const structuredMentions = parseStructuredMentions(finalContent);
+        if (structuredMentions.length > 0) {
+          const validUids = new Set(uidToNameMap.keys());
+          const converted = convertStructuredMentions(finalContent, structuredMentions, validUids);
+          finalContent = converted.content;
+          mentionEntities = [...converted.entities];
+          for (const uid of converted.uids) {
+            if (!mentionUids.includes(uid)) {
+              mentionUids.push(uid);
+            }
+          }
+        }
+
+        // v1 fallback: resolve remaining @name via memberMap
+        const { entities, uids } = buildEntitiesFromFallback(finalContent, accountMemberMap);
+        const existingOffsets = new Set(mentionEntities.map(e => e.offset));
+        for (const entity of entities) {
+          if (!existingOffsets.has(entity.offset)) {
+            mentionEntities.push(entity);
+          }
+        }
         for (const uid of uids) {
           if (!mentionUids.includes(uid)) {
             mentionUids.push(uid);
           }
         }
-        mentionEntities = entities;
       }
 
-      // Detect @all in content (case-insensitive, word boundary)
-      const hasAtAll = /(?:^|(?<=\s))@all(?=\s|[^\w]|$)/i.test(content);
+      // Detect @all/@所有人 in content
+      const hasAtAll = /(?:^|(?<=\s))@(?:all|所有人)(?=\s|[^\w]|$)/i.test(finalContent);
 
       await sendMessage({
         apiUrl: account.config.apiUrl,
         botToken: account.config.botToken,
         channelId,
         channelType,
-        content,
+        content: finalContent,
         ...(mentionUids.length > 0 ? { mentionUids } : {}),
         ...(mentionEntities.length > 0 ? { mentionEntities } : {}),
         mentionAll: hasAtAll || undefined,
@@ -417,11 +438,11 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       return { channel: "dmwork", to: ctx.to, messageId: "" };
     },
     sendMedia: async (ctx) => {
-      // Resolve correct accountId — only correct when framework passes default
-      const rawAccountId = ctx.accountId ?? DEFAULT_ACCOUNT_ID;
-      const accountId = (rawAccountId === DEFAULT_ACCOUNT_ID)
-        ? resolveOutboundAccountId(ctx.to, rawAccountId)
-        : rawAccountId;
+      // Resolve correct accountId — framework may pass wrong one for multi-bot setups
+      const accountId = resolveOutboundAccountId(
+        ctx.to,
+        ctx.accountId ?? DEFAULT_ACCOUNT_ID,
+      );
       const account = resolveDmworkAccount({
         cfg: ctx.cfg as OpenClawConfig,
         accountId,

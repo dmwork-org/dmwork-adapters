@@ -653,6 +653,28 @@ describe("buildEntitiesFromFallback — @all 跳过", () => {
     expect(uids).toEqual([]);
     expect(entities).toEqual([]);
   });
+
+  it("@所有人 不应生成 entity", () => {
+    const memberMap = new Map([["Bob", "uid_bob"]]);
+    const { entities, uids } = buildEntitiesFromFallback("@所有人 @Bob", memberMap);
+    expect(uids).toEqual(["uid_bob"]);
+    expect(entities).toHaveLength(1);
+    expect(entities[0]).toEqual({ uid: "uid_bob", offset: 5, length: 4 });
+  });
+
+  it("@所有人 单独出现也不应生成 entity", () => {
+    const memberMap = new Map<string, string>();
+    const { entities, uids } = buildEntitiesFromFallback("@所有人", memberMap);
+    expect(uids).toEqual([]);
+    expect(entities).toEqual([]);
+  });
+
+  it("混合 @all 和 @所有人 都不应生成 entity", () => {
+    const memberMap = new Map([["Bob", "uid_bob"]]);
+    const { entities, uids } = buildEntitiesFromFallback("@all @所有人 @Bob", memberMap);
+    expect(uids).toEqual(["uid_bob"]);
+    expect(entities).toHaveLength(1);
+  });
 });
 
 describe("convertContentForLLM — 空格昵称支持", () => {
