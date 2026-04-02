@@ -624,6 +624,37 @@ describe("buildEntitiesFromFallback — 空格昵称支持", () => {
   });
 });
 
+describe("buildEntitiesFromFallback — @all 跳过", () => {
+  it("@all 不应生成 entity", () => {
+    const memberMap = new Map([["Bob", "uid_bob"]]);
+    const { entities, uids } = buildEntitiesFromFallback("@all @Bob", memberMap);
+    expect(uids).toEqual(["uid_bob"]);
+    expect(entities).toHaveLength(1);
+    expect(entities[0]).toEqual({ uid: "uid_bob", offset: 5, length: 4 });
+  });
+
+  it("@All (大小写) 也不应生成 entity", () => {
+    const memberMap = new Map([["Bob", "uid_bob"]]);
+    const { entities, uids } = buildEntitiesFromFallback("@All @Bob", memberMap);
+    expect(uids).toEqual(["uid_bob"]);
+    expect(entities).toHaveLength(1);
+  });
+
+  it("@ALL 全大写不应生成 entity", () => {
+    const memberMap = new Map<string, string>();
+    const { entities, uids } = buildEntitiesFromFallback("@ALL please check", memberMap);
+    expect(uids).toEqual([]);
+    expect(entities).toEqual([]);
+  });
+
+  it("@all 单独出现也不应生成 entity", () => {
+    const memberMap = new Map<string, string>();
+    const { entities, uids } = buildEntitiesFromFallback("@all", memberMap);
+    expect(uids).toEqual([]);
+    expect(entities).toEqual([]);
+  });
+});
+
 describe("convertContentForLLM — 空格昵称支持", () => {
   it("v1 memberMap 路径应匹配空格昵称", () => {
     const content = "@Anyang Su 你好";

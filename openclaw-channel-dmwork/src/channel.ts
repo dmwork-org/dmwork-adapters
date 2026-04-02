@@ -352,11 +352,12 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
   outbound: {
     deliveryMode: "direct",
     sendText: async (ctx) => {
-      // Resolve correct accountId — framework may pass wrong one for multi-bot setups
-      const accountId = resolveOutboundAccountId(
-        ctx.to,
-        ctx.accountId ?? DEFAULT_ACCOUNT_ID,
-      );
+      // Resolve correct accountId — only correct when framework passes default
+      // (i.e. no explicit accountId). If user explicitly specified an accountId, respect it.
+      const rawAccountId = ctx.accountId ?? DEFAULT_ACCOUNT_ID;
+      const accountId = (rawAccountId === DEFAULT_ACCOUNT_ID)
+        ? resolveOutboundAccountId(ctx.to, rawAccountId)
+        : rawAccountId;
       const account = resolveDmworkAccount({
         cfg: ctx.cfg as OpenClawConfig,
         accountId,
@@ -399,6 +400,9 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         mentionEntities = entities;
       }
 
+      // Detect @all in content (case-insensitive, word boundary)
+      const hasAtAll = /(?:^|(?<=\s))@all(?=\s|[^\w]|$)/i.test(content);
+
       await sendMessage({
         apiUrl: account.config.apiUrl,
         botToken: account.config.botToken,
@@ -407,16 +411,17 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         content,
         ...(mentionUids.length > 0 ? { mentionUids } : {}),
         ...(mentionEntities.length > 0 ? { mentionEntities } : {}),
+        mentionAll: hasAtAll || undefined,
       });
 
       return { channel: "dmwork", to: ctx.to, messageId: "" };
     },
     sendMedia: async (ctx) => {
-      // Resolve correct accountId — framework may pass wrong one for multi-bot setups
-      const accountId = resolveOutboundAccountId(
-        ctx.to,
-        ctx.accountId ?? DEFAULT_ACCOUNT_ID,
-      );
+      // Resolve correct accountId — only correct when framework passes default
+      const rawAccountId = ctx.accountId ?? DEFAULT_ACCOUNT_ID;
+      const accountId = (rawAccountId === DEFAULT_ACCOUNT_ID)
+        ? resolveOutboundAccountId(ctx.to, rawAccountId)
+        : rawAccountId;
       const account = resolveDmworkAccount({
         cfg: ctx.cfg as OpenClawConfig,
         accountId,

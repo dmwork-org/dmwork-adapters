@@ -198,6 +198,10 @@ export function buildEntitiesFromFallback(
 
   while ((match = pattern.exec(content)) !== null) {
     const name = match[1];
+
+    // Skip @all / @All etc. — handled separately as mentionAll, not as entity
+    if (name.toLowerCase() === "all") continue;
+
     let uid: string | undefined;
     let matchedName = name;
 

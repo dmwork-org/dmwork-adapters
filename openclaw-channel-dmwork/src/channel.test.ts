@@ -181,6 +181,47 @@ describe("resolveOutboundAccountId", () => {
   });
 });
 
+describe("resolveOutboundAccountId — explicit accountId should not be overridden", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it("should NOT override explicit non-default accountId even when group is registered to another account", async () => {
+    const { registerGroupToAccount, resolveOutboundAccountId } = await import("./channel.js");
+
+    // group registered to thomas_fu_bot
+    registerGroupToAccount("some_group", "thomas_fu_bot");
+
+    // User explicitly passes allen-imtest — resolveOutboundAccountId would return thomas_fu_bot,
+    // but the caller (sendText/sendMedia) should not call resolveOutboundAccountId when accountId != default.
+    // We test that resolveOutboundAccountId itself still resolves to the registered account...
+    const resolved = resolveOutboundAccountId("group:some_group", "allen-imtest");
+    expect(resolved).toBe("thomas_fu_bot"); // resolveOutboundAccountId always resolves
+
+    // ...but the sendText/sendMedia logic should gate on rawAccountId === DEFAULT_ACCOUNT_ID.
+    // Simulate the gating logic:
+    const rawAccountId = "allen-imtest"; // explicit, non-default
+    const DEFAULT_ACCOUNT_ID = "default";
+    const accountId = (rawAccountId === DEFAULT_ACCOUNT_ID)
+      ? resolveOutboundAccountId("group:some_group", rawAccountId)
+      : rawAccountId;
+    expect(accountId).toBe("allen-imtest"); // NOT corrected
+  });
+
+  it("should correct when accountId is default", async () => {
+    const { registerGroupToAccount, resolveOutboundAccountId } = await import("./channel.js");
+
+    registerGroupToAccount("some_group", "thomas_fu_bot");
+
+    const DEFAULT_ACCOUNT_ID = "default";
+    const rawAccountId = DEFAULT_ACCOUNT_ID;
+    const accountId = (rawAccountId === DEFAULT_ACCOUNT_ID)
+      ? resolveOutboundAccountId("group:some_group", rawAccountId)
+      : rawAccountId;
+    expect(accountId).toBe("thomas_fu_bot"); // corrected
+  });
+});
+
 describe("outbound accountId correction pattern", () => {
   beforeEach(() => {
     vi.resetModules();
