@@ -200,7 +200,7 @@ describe("resolveOutboundAccountId — explicit accountId should not be overridd
 
     // ...but the sendText/sendMedia logic should gate on rawAccountId === DEFAULT_ACCOUNT_ID.
     // Simulate the gating logic:
-    const rawAccountId = "allen-imtest"; // explicit, non-default
+    const rawAccountId: string = "allen-imtest"; // explicit, non-default
     const DEFAULT_ACCOUNT_ID = "default";
     const accountId = (rawAccountId === DEFAULT_ACCOUNT_ID)
       ? resolveOutboundAccountId("group:some_group", rawAccountId)
