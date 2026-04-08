@@ -46,6 +46,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 20
 
       - uses: actions/setup-node@v4
         with:
@@ -75,14 +77,35 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      - name: 📋 Collect changes
+        id: changes
+        run: |
+          cd ..
+          # Get merge commits (squash-merged PRs) from recent history
+          CHANGES=$(git log --oneline --merges -10 --pretty=format:"%s" 2>/dev/null \
+            | grep -oP '#\d+.*' | head -5 | sed 's/^/PR /' || true)
+          if [ -z "$CHANGES" ]; then
+            # Fallback: recent commit messages
+            CHANGES=$(git log --oneline -5 --no-merges --pretty=format:"• %s" 2>/dev/null || echo "")
+          fi
+          # Escape for JSON
+          CHANGES_ESCAPED=$(echo "$CHANGES" | sed ':a;N;$!ba;s/\n/\\n/g' | sed 's/"/\\"/g')
+          echo "summary=$CHANGES_ESCAPED" >> "$GITHUB_OUTPUT"
+
       - name: 📢 Notify WeChat Work
         if: success()
         run: |
+          SHORT_SHA=$(echo "$GITHUB_SHA" | cut -c1-7)
+          CHANGES="${{ steps.changes.outputs.summary }}"
+          CHANGE_SECTION=""
+          if [ -n "$CHANGES" ]; then
+            CHANGE_SECTION="\n**变更内容汇总**\n${CHANGES}"
+          fi
           curl -s -X POST "${{ secrets.WECHAT_WEBHOOK_URL }}" \
             -H 'Content-Type: application/json' \
-            -d '{
-              "msgtype": "markdown",
-              "markdown": {
-                "content": "## 📦 npm @dev 发布成功\n> **包名：** openclaw-channel-dmwork\n> **版本：** `${{ steps.dev-version.outputs.version }}`\n> **分支：** develop\n> **提交：** [${{ github.sha }}](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})\n> **安装：** `npm i openclaw-channel-dmwork@dev`\n>\n> [查看 CI](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            -d "{
+              \"msgtype\": \"markdown\",
+              \"markdown\": {
+                \"content\": \"✅ **openclaw-channel-dmwork @dev 发布**\n**Pipeline:** #${{ github.run_number }} 成功\n**版本:** \`${{ steps.dev-version.outputs.version }}\`\n**REV:** ${SHORT_SHA}\n**安装:** \`npm i openclaw-channel-dmwork@dev\`${CHANGE_SECTION}\n\n[查看 CI](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\"
               }
-            }'
+            }"
