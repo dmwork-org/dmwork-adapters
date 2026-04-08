@@ -34,3 +34,41 @@ jobs:
 
       - name: 🏗️ Build
         run: npm run build
+
+  publish-dev:
+    name: Publish @dev
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    defaults:
+      run:
+        working-directory: openclaw-channel-dmwork
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+          cache-dependency-path: openclaw-channel-dmwork/package-lock.json
+
+      - name: 📦 Install
+        run: npm ci
+
+      - name: 🏗️ Build
+        run: npm run build
+
+      - name: 🏷️ Set dev version
+        run: |
+          BASE_VER=$(node -p "require('./package.json').version")
+          SHORT_SHA=$(echo "$GITHUB_SHA" | cut -c1-7)
+          DEV_VER="${BASE_VER}-dev.${SHORT_SHA}"
+          npm version "$DEV_VER" --no-git-tag-version
+          echo "📦 Dev version: $DEV_VER"
+
+      - name: 🚀 Publish to npm (dev tag)
+        run: npm publish --tag dev
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
