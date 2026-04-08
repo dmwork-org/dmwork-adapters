@@ -7,6 +7,7 @@ variables:
   APP_NAME: dmwork-adapters
   FF_USE_FASTZIP: "true"
   ROBOT_PUSH_MESSAGE: "enable"
+  NODE_LLAMA_CPP_SKIP_BUILD: "1"
 
 # ============================================================
 # 测试阶段
@@ -15,7 +16,7 @@ test:
   stage: test
   tags:
     - tke-deepmining-runner
-  image: tbj7-xtiao-tcr1.tencentcloudcr.com/xtiao-release/node:22
+  image: docker.m.daocloud.io/library/node:22-alpine
   only:
     - main
     - develop
@@ -29,7 +30,7 @@ test:
   before_script:
     - cd openclaw-channel-dmwork
     - npm config set registry https://registry.npmmirror.com
-    - npm ci
+    - npm ci --ignore-scripts
   script:
     - echo "🔍 Type Check..."
     - npx tsc --noEmit
@@ -45,7 +46,7 @@ test:
   stage: publish
   tags:
     - tke-deepmining-runner
-  image: tbj7-xtiao-tcr1.tencentcloudcr.com/xtiao-release/node:22
+  image: docker.m.daocloud.io/library/node:22-alpine
   cache:
     key: ${CI_COMMIT_REF_SLUG}
     paths:
@@ -53,7 +54,7 @@ test:
   before_script:
     - cd openclaw-channel-dmwork
     - npm config set registry https://registry.npmmirror.com
-    - npm ci
+    - npm ci --ignore-scripts
     - echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
 
 # ============================================================
