@@ -63,3 +63,15 @@ jobs:
           VERSION=${{ steps.version-check.outputs.local }}
           git tag "v${VERSION}"
           git push origin "v${VERSION}"
+
+      - name: 📢 Notify WeChat Work
+        if: steps.version-check.outputs.skip == 'false' && success()
+        run: |
+          curl -s -X POST "${{ secrets.WECHAT_WEBHOOK_URL }}" \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "msgtype": "markdown",
+              "markdown": {
+                "content": "## 🚀 npm @latest 正式发布\n> **包名：** openclaw-channel-dmwork\n> **版本：** `${{ steps.version-check.outputs.local }}`\n> **分支：** main\n> **提交：** [${{ github.sha }}](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})\n> **安装：** `npm i openclaw-channel-dmwork`\n>\n> [查看 CI](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+              }
+            }'
