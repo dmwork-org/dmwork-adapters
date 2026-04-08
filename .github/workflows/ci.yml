@@ -61,14 +61,28 @@ jobs:
         run: npm run build
 
       - name: 🏷️ Set dev version
+        id: dev-version
         run: |
           BASE_VER=$(node -p "require('./package.json').version")
           SHORT_SHA=$(echo "$GITHUB_SHA" | cut -c1-7)
           DEV_VER="${BASE_VER}-dev.${SHORT_SHA}"
           npm version "$DEV_VER" --no-git-tag-version
+          echo "version=$DEV_VER" >> "$GITHUB_OUTPUT"
           echo "📦 Dev version: $DEV_VER"
 
       - name: 🚀 Publish to npm (dev tag)
         run: npm publish --tag dev
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: 📢 Notify WeChat Work
+        if: success()
+        run: |
+          curl -s -X POST "${{ secrets.WECHAT_WEBHOOK_URL }}" \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "msgtype": "markdown",
+              "markdown": {
+                "content": "## 📦 npm @dev 发布成功\n> **包名：** openclaw-channel-dmwork\n> **版本：** `${{ steps.dev-version.outputs.version }}`\n> **分支：** develop\n> **提交：** [${{ github.sha }}](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})\n> **安装：** `npm i openclaw-channel-dmwork@dev`\n>\n> [查看 CI](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+              }
+            }'
