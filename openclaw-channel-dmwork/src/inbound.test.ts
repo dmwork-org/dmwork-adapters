@@ -667,7 +667,7 @@ describe("downloadMediaToLocal", () => {
 
     expect(result).toBeDefined();
     expect(result).not.toContain("http");
-    expect(result!.startsWith("/tmp/dmwork-media/")).toBe(true);
+    expect(result!.startsWith("/tmp/dmwork-temp/media/")).toBe(true);
     expect(result!.endsWith(".jpeg")).toBe(true);
     expect(existsSync(result!)).toBe(true);
     expect(readFileSync(result!)).toEqual(Buffer.from(imageData));

@@ -20,62 +20,29 @@ import type { MentionEntity } from "./types.js";
 import { handleDmworkMessageAction, parseTarget } from "./actions.js";
 import { createDmworkManagementTools } from "./agent-tools.js";
 import { getOrCreateGroupMdCache, registerBotGroupIds, getKnownGroupIds } from "./group-md.js";
+import { UPLOAD_DIR, cleanupTempDir, streamDownloadToFile } from "./temp-utils.js";
 import path from "node:path";
 import os from "node:os";
 import { mkdir, readFile, writeFile, unlink } from "node:fs/promises";
-import { createReadStream, createWriteStream, statSync } from "node:fs";
+import { createReadStream, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { pipeline } from "node:stream/promises";
-import { Readable } from "node:stream";
 // HistoryEntry type - compatible with any version
 type HistoryEntry = { sender: string; body: string; timestamp: number };
 const DEFAULT_GROUP_HISTORY_LIMIT = 20;
 
 const MAX_UPLOAD_SIZE = 500 * 1024 * 1024; // 500 MB
-const UPLOAD_TEMP_DIR = path.join("/tmp", "dmwork-upload");
 
 /** Download a URL to a temp file with backpressure, return the temp path. */
 async function downloadToTempFile(url: string, filename: string, signal?: AbortSignal): Promise<{ tempPath: string; contentType: string | undefined }> {
-  await mkdir(UPLOAD_TEMP_DIR, { recursive: true });
-  const tempPath = path.join(UPLOAD_TEMP_DIR, `${randomUUID()}-${filename}`);
-
-  // HEAD to check size first
-  const head = await fetch(url, { method: "HEAD", signal: signal ?? AbortSignal.timeout(30_000) });
-  const contentLength = Number(head.headers.get("content-length") || 0);
-  if (contentLength > MAX_UPLOAD_SIZE) {
-    throw new Error(`File too large (${contentLength} bytes, max ${MAX_UPLOAD_SIZE})`);
-  }
-
-  const resp = await fetch(url, { signal: signal ?? AbortSignal.timeout(300_000) });
-  if (!resp.ok) throw new Error(`Failed to download media from ${url}: ${resp.status}`);
-  const contentType = resp.headers.get("content-type") ?? undefined;
-
-  const body = resp.body;
-  if (!body) throw new Error(`No response body from ${url}`);
-  const nodeStream = Readable.fromWeb(body as any);
-  const ws = createWriteStream(tempPath);
-  try {
-    await pipeline(nodeStream, ws);
-  } catch (err) {
-    // Cleanup partial temp file on download failure
-    await unlink(tempPath).catch(() => {});
-    throw err;
-  }
-  return { tempPath, contentType };
-}
-
-/** Cleanup old temp upload files (>1h). Called opportunistically. */
-async function cleanupOldUploadTempFiles(): Promise<void> {
-  try {
-    const { readdir, stat, unlink: rm } = await import("node:fs/promises");
-    const files = await readdir(UPLOAD_TEMP_DIR);
-    const now = Date.now();
-    for (const f of files) {
-      const fp = path.join(UPLOAD_TEMP_DIR, f);
-      const st = await stat(fp).catch(() => null);
-      if (st && now - st.mtimeMs > 3600_000) await rm(fp).catch(() => {});
-    }
-  } catch { /* dir may not exist */ }
+  const result = await streamDownloadToFile({
+    url,
+    destDir: UPLOAD_DIR,
+    filename,
+    maxSize: MAX_UPLOAD_SIZE,
+    timeoutMs: 300_000,
+    headCheck: true,
+  });
+  return { tempPath: result.localPath, contentType: result.contentType };
 }
 
 // Module-level history storage — survives auto-restarts
@@ -465,7 +432,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       let localFilePath: string | undefined; // path for parseImageDimensionsFromFile
 
       // Opportunistic cleanup of stale temp files
-      cleanupOldUploadTempFiles().catch(() => {});
+      cleanupTempDir(UPLOAD_DIR).catch(() => {});
 
       if (mediaUrl.startsWith("data:")) {
         // Parse data URI: data:[<mediatype>][;base64],<data>
