@@ -163,6 +163,8 @@ class Decoder:
 
 def encode_variable_length(length: int) -> bytes:
     """Encode an integer as MQTT-style variable-length bytes."""
+    if length == 0:
+        return b"\x00"
     result = bytearray()
     while length > 0:
         digit = length % 0x80
