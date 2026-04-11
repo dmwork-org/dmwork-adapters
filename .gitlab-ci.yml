@@ -78,6 +78,24 @@ publish_npm_dev:
     url: https://www.npmjs.com/package/openclaw-channel-dmwork
 
 # ============================================================
+# 发布到 npm - latest 版本（main 分支）
+# 版本号直接从 package.json 读取
+# ============================================================
+publish_npm_stable:
+  <<: *publish
+  only:
+    - main
+  script:
+    - echo "🏗️ Building for stable publish..."
+    - npm run build
+    - CURRENT_VERSION=$(node -p "require('./package.json').version")
+    - echo "📦 Publishing stable version ${CURRENT_VERSION}"
+    - npm publish --access public --tag latest
+  environment:
+    name: npm
+    url: https://www.npmjs.com/package/openclaw-channel-dmwork
+
+# ============================================================
 # 发布到 npm - latest 版本（tag 触发）
 # ============================================================
 publish_npm:
@@ -119,8 +137,9 @@ notify-job-when-success:
       ENV_LABEL="dev"
       MESSAGE="🚀 Dev 发布成功 | 📦 DMWork Adapters [$ENV_LABEL]\n📌 版本: *-dev.$CI_COMMIT_SHORT_SHA\n⏱️ 时间: $BUILD_DATE\n📝 提交: $CI_COMMIT_SHORT_SHA\n🔗 npm: https://www.npmjs.com/package/openclaw-channel-dmwork"
     elif [[ "$CI_COMMIT_REF_NAME" == "main" ]]; then
-      ENV_LABEL="Prod"
-      MESSAGE="✅ CI 通过 | 📦 DMWork Adapters [$ENV_LABEL]\n⏱️ 时间: $BUILD_DATE\n📦 分支: $CI_COMMIT_REF_NAME\n📝 提交: $CI_COMMIT_SHORT_SHA"
+      ENV_LABEL="latest"
+      CURRENT_VERSION=$(node -p "require('/builds/$CI_PROJECT_PATH/openclaw-channel-dmwork/package.json').version" 2>/dev/null || echo "unknown")
+      MESSAGE="🎉 发布成功 | 📦 DMWork Adapters [$ENV_LABEL]\n📌 版本: $CURRENT_VERSION\n⏱️ 时间: $BUILD_DATE\n📝 提交: $CI_COMMIT_SHORT_SHA\n🔗 npm: https://www.npmjs.com/package/openclaw-channel-dmwork"
     elif [[ "$CI_COMMIT_REF_NAME" == "test" ]]; then
       ENV_LABEL="Test"
       MESSAGE="✅ CI 通过 | 📦 DMWork Adapters [$ENV_LABEL]\n⏱️ 时间: $BUILD_DATE\n📦 分支: $CI_COMMIT_REF_NAME\n📝 提交: $CI_COMMIT_SHORT_SHA"
