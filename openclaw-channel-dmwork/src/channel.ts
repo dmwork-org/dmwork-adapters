@@ -286,7 +286,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
     chatTypes: ["direct", "group"],
     media: true,
     reactions: false,
-    threads: false,
+    threads: false,  // threading handled via agent-tools, not SDK ChannelThreadingAdapter
   },
   reload: { configPrefixes: ["channels.dmwork"] },
   actions: {

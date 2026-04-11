@@ -23,16 +23,13 @@ export function getRuntime(): PluginRuntime {
   return _runtime;
 }
 
-// ── Value re-exports with safe fallback ───────────────────────────────────
+// ── Value re-exports ──────────────────────────────────────────────────────
 
+// Resolved lazily in loadOptionalSdkExports() to avoid top-level require()
+// which would throw ReferenceError in a pure ESM runtime.
 let _DEFAULT_ACCOUNT_ID = "__default__";
-try {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const sdk = require("openclaw/plugin-sdk");
-  if (sdk.DEFAULT_ACCOUNT_ID) _DEFAULT_ACCOUNT_ID = sdk.DEFAULT_ACCOUNT_ID;
-} catch { /* fallback if SDK not resolvable at require time */ }
 
-export const DEFAULT_ACCOUNT_ID = _DEFAULT_ACCOUNT_ID;
+export { _DEFAULT_ACCOUNT_ID as DEFAULT_ACCOUNT_ID };
 
 // ── Optional SDK exports with fallbacks ───────────────────────────────────
 
@@ -40,14 +37,22 @@ let _clearHistoryEntriesIfEnabled:
   | ((map: Map<string, unknown[]>, limit: number) => void)
   | null = null;
 let _defaultGroupHistoryLimit = 20;
+let _optionalLoaded = false;
 
 /**
  * Load optional SDK exports that may not exist in older versions.
+ * Idempotent — safe to call multiple times (hot reload / account restart).
  * Call once during startAccount after probe passes.
  */
 export async function loadOptionalSdkExports(): Promise<void> {
+  if (_optionalLoaded) return;
+  _optionalLoaded = true;
   try {
     const sdk: Record<string, unknown> = await import("openclaw/plugin-sdk");
+    // Resolve DEFAULT_ACCOUNT_ID from SDK (deferred from module scope for ESM compat)
+    if (typeof sdk.DEFAULT_ACCOUNT_ID === "string") {
+      _DEFAULT_ACCOUNT_ID = sdk.DEFAULT_ACCOUNT_ID;
+    }
     if (typeof sdk.clearHistoryEntriesIfEnabled === "function") {
       _clearHistoryEntriesIfEnabled = sdk.clearHistoryEntriesIfEnabled as typeof _clearHistoryEntriesIfEnabled;
     }
