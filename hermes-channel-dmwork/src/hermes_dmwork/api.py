@@ -263,8 +263,13 @@ async def send_message(
         payload["mention"] = mention
 
     # Add reply field
-    if reply_msg_id:
-        payload["reply"] = {"message_id": reply_msg_id}
+    # Note: reply_msg_id is intentionally not sent in the payload.
+    # The DMWork web client expects reply.payload to be a string,
+    # but {"message_id": "xxx"} lacks that field, causing a frontend
+    # crash ("Cannot read properties of undefined (reading 'startsWith')").
+    # TODO: investigate correct reply payload format before re-enabling.
+    # if reply_msg_id:
+    #     payload["reply"] = {"message_id": reply_msg_id}
 
     body: dict[str, Any] = {
         "channel_id": channel_id,

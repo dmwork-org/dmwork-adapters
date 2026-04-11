@@ -829,16 +829,17 @@ class DMWorkAdapter(BasePlatformAdapter):
                 reply_to_text=reply_text,
             )
 
+            # Always pass channel_type so send() can distinguish DM vs Group
+            event.raw_message = {
+                "channel_id": msg.channel_id if is_group else msg.from_uid,
+                "channel_type": msg.channel_type,
+            }
+
             # Inject GROUP.md as metadata
             if is_group and msg.channel_id:
                 group_md = self._group_md_cache.get(msg.channel_id)
                 if group_md and group_md.get("content"):
-                    # Store in raw_message for the gateway to pick up
-                    event.raw_message = {
-                        "group_system_prompt": group_md["content"],
-                        "channel_id": msg.channel_id,
-                        "channel_type": msg.channel_type,
-                    }
+                    event.raw_message["group_system_prompt"] = group_md["content"]
 
             # Dispatch to handler
             await self.handle_message(event)
