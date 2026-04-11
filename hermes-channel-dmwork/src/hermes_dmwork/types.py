@@ -60,6 +60,14 @@ class ReplyPayload:
     from_name: Optional[str] = None
 
 
+def _safe_message_type(raw: int) -> "MessageType | int":
+    """Convert raw type int to MessageType, falling back to raw int for unknown values."""
+    try:
+        return MessageType(raw)
+    except ValueError:
+        return raw
+
+
 @dataclass
 class MessagePayload:
     """
@@ -109,7 +117,7 @@ class MessagePayload:
             )
 
         return cls(
-            type=MessageType(data.get("type", 1)),
+            type=_safe_message_type(data.get("type", 1)),
             content=data.get("content"),
             url=data.get("url"),
             name=data.get("name"),
