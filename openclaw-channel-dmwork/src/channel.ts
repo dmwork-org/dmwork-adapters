@@ -1,9 +1,16 @@
 import {
   DEFAULT_ACCOUNT_ID,
-  type ChannelOutboundContext,
-  type ChannelPlugin,
+  setRuntime,
+  getRuntime,
+  probeRuntimeMethods,
+  loadOptionalSdkExports,
+} from "./sdk-compat.js";
+import type {
+  ChannelOutboundContext,
+  ChannelPlugin,
+  OpenClawConfig,
+  ChannelMessageActionAdapter,
 } from "openclaw/plugin-sdk";
-import type { OpenClawConfig, ChannelMessageActionAdapter } from "openclaw/plugin-sdk";
 import { DmworkConfigJsonSchema } from "./config-schema.js";
 import {
   listDmworkAccountIds,
@@ -279,14 +286,10 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
     chatTypes: ["direct", "group"],
     media: true,
     reactions: false,
-    threads: true,
+    threads: false,
   },
   reload: { configPrefixes: ["channels.dmwork"] },
   actions: {
-    listActions: ({ cfg }: { cfg: any }) => {
-      const actions = getAvailableActions(cfg);
-      return actions as any; // TODO: remove when SDK types support this
-    },
     describeMessageTool: ({ cfg }: { cfg: any }) => {
       const actions = getAvailableActions(cfg);
       if (actions.length === 0) return null;
@@ -341,7 +344,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         log: ctx.log,
       });
     },
-  } as any, // TODO: remove when SDK types support this
+  } as any,  // SDK ChannelMessageActionAdapter type mismatch on extractToolSend return
   agentTools: (params: { cfg?: any }) => createDmworkManagementTools(params),
   agentPrompt: {
     messageToolHints: ({ cfg, accountId }: { cfg: any; accountId?: string | null }) => {
@@ -643,6 +646,16 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
     startAccount: async (ctx) => {
       // Ensure cleanup timer is running (singleton pattern for hot reload safety)
       ensureCleanupTimer();
+
+      // SDK compatibility probe — reject startup if core methods missing
+      const probe = probeRuntimeMethods(getRuntime());
+      if (!probe.ok) {
+        const msg = `dmwork: SDK incompatible — missing: ${probe.missing.join(", ")}. ` +
+          `Upgrade OpenClaw (>= 2026.2.0) or update openclaw-channel-dmwork.`;
+        ctx.log?.error?.(msg);
+        throw new Error(msg);
+      }
+      await loadOptionalSdkExports();
 
       const account = ctx.account;
       if (!account.configured || !account.config.botToken) {
