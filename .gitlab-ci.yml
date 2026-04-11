@@ -1,0 +1,190 @@
+stages:
+  - test
+  - publish
+  - notify
+
+variables:
+  APP_NAME: dmwork-adapters
+  FF_USE_FASTZIP: "true"
+  ROBOT_PUSH_MESSAGE: "enable"
+  NODE_LLAMA_CPP_SKIP_BUILD: "1"
+
+# ============================================================
+# 测试阶段
+# ============================================================
+test:
+  stage: test
+  tags:
+    - tke-deepmining-runner
+  image: docker.m.daocloud.io/library/node:22-alpine
+  only:
+    - main
+    - develop
+    - test
+    - tags
+    - merge_requests
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - openclaw-channel-dmwork/node_modules/
+  before_script:
+    - cd openclaw-channel-dmwork
+    - npm config set registry https://registry.npmmirror.com
+    - npm ci --ignore-scripts
+  script:
+    - echo "🔍 Type Check..."
+    - npx tsc --noEmit
+    - echo "🧪 Running Tests..."
+    - npm test
+    - echo "🏗️ Building..."
+    - npm run build
+
+# ============================================================
+# 发布模板
+# ============================================================
+.publish: &publish
+  stage: publish
+  tags:
+    - tke-deepmining-runner
+  image: docker.m.daocloud.io/library/node:22-alpine
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - openclaw-channel-dmwork/node_modules/
+  before_script:
+    - cd openclaw-channel-dmwork
+    - npm config set registry https://registry.npmmirror.com
+    - npm ci --ignore-scripts
+    - echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+
+# ============================================================
+# 发布到 npm - dev 版本（develop 分支）
+# 版本格式: x.y.z-dev.{commit_hash}
+# ============================================================
+publish_npm_dev:
+  <<: *publish
+  only:
+    - develop
+  script:
+    - echo "🏗️ Building for dev publish..."
+    - npm run build
+    - CURRENT_VERSION=$(node -p "require('./package.json').version")
+    - DEV_VERSION="${CURRENT_VERSION}-dev.${CI_COMMIT_SHORT_SHA}"
+    - echo "📦 Publishing dev version ${DEV_VERSION}"
+    - npm version ${DEV_VERSION} --no-git-tag-version
+    - npm publish --access public --tag dev
+  environment:
+    name: npm-dev
+    url: https://www.npmjs.com/package/openclaw-channel-dmwork
+
+# ============================================================
+# 发布到 npm - latest 版本（tag 触发）
+# ============================================================
+publish_npm:
+  <<: *publish
+  only:
+    - tags
+  script:
+    - "echo '🏗️ Building for publish...'"
+    - "npm run build"
+    - "echo '📦 Publishing version: ${CI_COMMIT_TAG}'"
+    - "npm publish --access public"
+  environment:
+    name: npm
+    url: https://www.npmjs.com/package/openclaw-channel-dmwork
+
+# ============================================================
+# 构建成功通知
+# ============================================================
+notify-job-when-success:
+  stage: notify
+  tags:
+    - tke-deepmining-runner
+  only:
+    - main
+    - develop
+    - test
+    - tags
+  when: on_success
+  image: tbj7-xtiao-tcr1.tencentcloudcr.com/xtiao-release/alpine/curl:8.11.1
+  variables:
+    GIT_STRATEGY: none
+  script: |
+    if [[ "$ROBOT_PUSH_MESSAGE" == "disable" ]]; then exit 0; fi
+    BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    if [[ -n "$CI_COMMIT_TAG" ]]; then
+      ENV_LABEL="latest"
+      MESSAGE="🎉 发布成功 | 📦 DMWork Adapters [$ENV_LABEL]\n📌 版本: $CI_COMMIT_TAG\n⏱️ 时间: $BUILD_DATE\n📝 提交: $CI_COMMIT_SHORT_SHA\n🔗 npm: https://www.npmjs.com/package/openclaw-channel-dmwork"
+    elif [[ "$CI_COMMIT_REF_NAME" == "develop" ]]; then
+      ENV_LABEL="dev"
+      MESSAGE="🚀 Dev 发布成功 | 📦 DMWork Adapters [$ENV_LABEL]\n📌 版本: *-dev.$CI_COMMIT_SHORT_SHA\n⏱️ 时间: $BUILD_DATE\n📝 提交: $CI_COMMIT_SHORT_SHA\n🔗 npm: https://www.npmjs.com/package/openclaw-channel-dmwork"
+    elif [[ "$CI_COMMIT_REF_NAME" == "main" ]]; then
+      ENV_LABEL="Prod"
+      MESSAGE="✅ CI 通过 | 📦 DMWork Adapters [$ENV_LABEL]\n⏱️ 时间: $BUILD_DATE\n📦 分支: $CI_COMMIT_REF_NAME\n📝 提交: $CI_COMMIT_SHORT_SHA"
+    elif [[ "$CI_COMMIT_REF_NAME" == "test" ]]; then
+      ENV_LABEL="Test"
+      MESSAGE="✅ CI 通过 | 📦 DMWork Adapters [$ENV_LABEL]\n⏱️ 时间: $BUILD_DATE\n📦 分支: $CI_COMMIT_REF_NAME\n📝 提交: $CI_COMMIT_SHORT_SHA"
+    else
+      ENV_LABEL="Dev"
+      MESSAGE="✅ CI 通过 | 📦 DMWork Adapters [$ENV_LABEL]\n⏱️ 时间: $BUILD_DATE\n📦 分支: $CI_COMMIT_REF_NAME\n📝 提交: $CI_COMMIT_SHORT_SHA"
+    fi
+    CHANGE_LOG=$(echo "$CI_COMMIT_MESSAGE" | head -1)
+    MESSAGE="$MESSAGE\n📋 更新: $CHANGE_LOG"
+    if [[ -n "$DISCORD_WEBHOOK" ]]; then
+      curl -X POST "$DISCORD_WEBHOOK" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $DISCORD_AUTH_TOKEN" \
+        -d "{\"content\":\"$MESSAGE\"}"
+    fi
+    if [[ -n "$WECOM_WEBHOOK" ]]; then
+      curl -s -X POST "$WECOM_WEBHOOK" \
+        -H "Content-Type: application/json" \
+        -d "{\"msgtype\":\"text\",\"text\":{\"content\":\"$(echo -e $MESSAGE)\"}}"
+    fi
+
+# ============================================================
+# 构建失败通知
+# ============================================================
+notify-job-when-fail:
+  stage: notify
+  tags:
+    - tke-deepmining-runner
+  only:
+    - main
+    - develop
+    - test
+    - tags
+  when: on_failure
+  image: tbj7-xtiao-tcr1.tencentcloudcr.com/xtiao-release/alpine/curl:8.11.1
+  variables:
+    GIT_STRATEGY: none
+  script: |
+    if [[ "$ROBOT_PUSH_MESSAGE" == "disable" ]]; then exit 0; fi
+    BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    if [[ -n "$CI_COMMIT_TAG" ]]; then
+      ENV_LABEL="latest"
+      MESSAGE="❌ 发布失败 | 📦 DMWork Adapters [$ENV_LABEL]\n📌 版本: $CI_COMMIT_TAG\n⏱️ 时间: $BUILD_DATE\n📝 提交: $CI_COMMIT_SHORT_SHA\n🔗 Pipeline: $CI_PIPELINE_URL"
+    elif [[ "$CI_COMMIT_REF_NAME" == "develop" ]]; then
+      ENV_LABEL="dev"
+      MESSAGE="❌ Dev 发布失败 | 📦 DMWork Adapters [$ENV_LABEL]\n📌 版本: *-dev.$CI_COMMIT_SHORT_SHA\n⏱️ 时间: $BUILD_DATE\n📝 提交: $CI_COMMIT_SHORT_SHA\n🔗 Pipeline: $CI_PIPELINE_URL"
+    elif [[ "$CI_COMMIT_REF_NAME" == "main" ]]; then
+      ENV_LABEL="Prod"
+      MESSAGE="❌ CI 失败 | 📦 DMWork Adapters [$ENV_LABEL]\n⏱️ 时间: $BUILD_DATE\n📦 分支: $CI_COMMIT_REF_NAME\n📝 提交: $CI_COMMIT_SHORT_SHA\n🔗 Pipeline: $CI_PIPELINE_URL"
+    elif [[ "$CI_COMMIT_REF_NAME" == "test" ]]; then
+      ENV_LABEL="Test"
+      MESSAGE="❌ CI 失败 | 📦 DMWork Adapters [$ENV_LABEL]\n⏱️ 时间: $BUILD_DATE\n📦 分支: $CI_COMMIT_REF_NAME\n📝 提交: $CI_COMMIT_SHORT_SHA\n🔗 Pipeline: $CI_PIPELINE_URL"
+    else
+      ENV_LABEL="Dev"
+      MESSAGE="❌ CI 失败 | 📦 DMWork Adapters [$ENV_LABEL]\n⏱️ 时间: $BUILD_DATE\n📦 分支: $CI_COMMIT_REF_NAME\n📝 提交: $CI_COMMIT_SHORT_SHA\n🔗 Pipeline: $CI_PIPELINE_URL"
+    fi
+    if [[ -n "$DISCORD_WEBHOOK" ]]; then
+      curl -X POST "$DISCORD_WEBHOOK" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $DISCORD_AUTH_TOKEN" \
+        -d "{\"content\":\"$MESSAGE\"}"
+    fi
+    if [[ -n "$WECOM_WEBHOOK" ]]; then
+      curl -s -X POST "$WECOM_WEBHOOK" \
+        -H "Content-Type: application/json" \
+        -d "{\"msgtype\":\"text\",\"text\":{\"content\":\"$(echo -e $MESSAGE)\"}}"
+    fi
