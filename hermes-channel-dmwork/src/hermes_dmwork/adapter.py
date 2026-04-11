@@ -704,6 +704,12 @@ class DMWorkAdapter(BasePlatformAdapter):
 
         is_group = msg.channel_type == ChannelType.Group
 
+        # ── require_mention filter: skip group messages that don't @bot ──
+        if is_group and self._require_mention:
+            mention_uids = extract_mention_uids(payload.mention) if payload.mention else []
+            if self._robot_id not in mention_uids:
+                return
+
         # ── Handle GROUP.md events (Phase 3) ──
         event_type = None
         if payload.event and isinstance(payload.event, dict):
