@@ -27,7 +27,7 @@ import websockets
 import websockets.exceptions
 
 from hermes_dmwork import api
-from hermes_dmwork.mention import extract_mention_uids, convert_content_for_llm
+from hermes_dmwork.mention import extract_mention_uids, convert_content_for_llm, parse_structured_mentions, convert_structured_mentions
 from hermes_dmwork.protocol import (
     PROTO_VERSION,
     PacketType,
@@ -1016,6 +1016,18 @@ class DMWorkAdapter(BasePlatformAdapter):
         if len(content) > self._stream_threshold and not (metadata and metadata.get("no_stream")):
             return await self._send_with_stream(chat_id, content, channel_type, reply_to)
 
+        # ── Process outbound @[uid:name] mentions ──
+        mention_uids = None
+        mention_entities = None
+        structured = parse_structured_mentions(content)
+        if structured:
+            valid_uids = {m.uid for m in structured}
+            conv_result = convert_structured_mentions(content, structured, valid_uids)
+            content = conv_result.content
+            if conv_result.entities:
+                mention_uids = conv_result.uids
+                mention_entities = conv_result.entities
+
         # Split long messages
         chunks = self.truncate_message(content, MAX_MESSAGE_LENGTH)
 
@@ -1029,6 +1041,8 @@ class DMWorkAdapter(BasePlatformAdapter):
                     channel_type=channel_type,
                     content=chunk,
                     reply_msg_id=reply_to,
+                    mention_uids=mention_uids,
+                    mention_entities=mention_entities,
                 )
             return SendResult(success=True)
         except Exception as e:
