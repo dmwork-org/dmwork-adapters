@@ -3,7 +3,7 @@ import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupM
 import type { ResolvedDmworkAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType } from "./types.js";
-import { getDmworkRuntime } from "./runtime.js";
+import { getRuntime, clearHistoryIfEnabled, getDefaultGroupHistoryLimit } from "./sdk-compat.js";
 import { DEFAULT_HISTORY_PROMPT_TEMPLATE } from "./config-schema.js";
 import {
   extractMentionMatches,
@@ -21,30 +21,6 @@ import { createWriteStream } from "node:fs";
 import { mkdir, unlink, readdir, stat } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { randomUUID } from "node:crypto";
-
-// Defensive imports — these may not exist in older OpenClaw versions
-// History context managed manually for cross-SDK compatibility
-let clearHistoryEntriesIfEnabled: any;
-let DEFAULT_GROUP_HISTORY_LIMIT = 20;
-let _sdkLoaded = false;
-
-async function ensureSdkLoaded() {
-  if (_sdkLoaded) return;
-  _sdkLoaded = true;
-  try {
-    const sdk = await import("openclaw/plugin-sdk");
-    // History context managed manually (SDK buildPendingHistoryContextFromMap
-    // has incompatible entry format expectations across versions)
-    if (typeof sdk.clearHistoryEntriesIfEnabled === "function") {
-      clearHistoryEntriesIfEnabled = sdk.clearHistoryEntriesIfEnabled;
-    }
-    if (sdk.DEFAULT_GROUP_HISTORY_LIMIT) {
-      DEFAULT_GROUP_HISTORY_LIMIT = sdk.DEFAULT_GROUP_HISTORY_LIMIT;
-    }
-  } catch {
-    // Older OpenClaw versions may not export these — fallback implementations used
-  }
-}
 
 
 
@@ -943,7 +919,7 @@ export async function handleInboundMessage(params: {
 }) {
   const { account, message, botUid, groupHistories, memberMap, uidToNameMap, groupCacheTimestamps, groupMdCache, log, statusSink } = params;
 
-  await ensureSdkLoaded();
+  
 
   // Detect GROUP.md update/delete notification — refresh both memory + disk cache, do NOT pass to LLM
   const earlyEventType = (message.payload as any)?.event?.type;
@@ -1003,7 +979,7 @@ export async function handleInboundMessage(params: {
   if (isGroup && message.channel_id) {
     // Resolve agentId for the group→account mapping
     try {
-      const _core = getDmworkRuntime();
+      const _core = getRuntime();
       const _cfg = _core.config.loadConfig() as OpenClawConfig;
       const _route = _core.channel.routing.resolveAgentRoute({
         cfg: _cfg, channel: "dmwork", accountId: account.accountId,
@@ -1159,7 +1135,7 @@ export async function handleInboundMessage(params: {
         msgType: message.payload?.type,
         timestamp: message.timestamp ? message.timestamp * 1000 : Date.now(),
       });
-      const historyLimit = account.config.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT;
+      const historyLimit = account.config.historyLimit ?? getDefaultGroupHistoryLimit();
       while (entries.length > historyLimit) {
         entries.shift();
       }
@@ -1171,7 +1147,7 @@ export async function handleInboundMessage(params: {
 
     // Bot IS mentioned — prepend history context (manual — avoids SDK format incompatibility)
     // Sliding window: always include the most recent historyLimit messages
-    const historyLimit = account.config.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT;
+    const historyLimit = account.config.historyLimit ?? getDefaultGroupHistoryLimit();
     let entries = groupHistories.get(sessionId) ?? [];
     // Take last N entries (sliding window)
     if (entries.length > historyLimit) {
@@ -1259,14 +1235,8 @@ export async function handleInboundMessage(params: {
     log?.info?.(`dmwork: [MENTION] 历史滑动窗口 | session=${sessionId} | 队列保留`);
   }
 
-  const core = getDmworkRuntime();
-  if (!core?.channel?.reply?.dispatchReplyWithBufferedBlockDispatcher) {
-    log?.error?.(`dmwork: OpenClaw runtime missing required functions. Available: config=${!!core?.config}, channel=${!!core?.channel}, reply=${!!core?.channel?.reply}, routing=${!!core?.channel?.routing}, session=${!!core?.channel?.session}`);
-    log?.error?.(`dmwork: reply methods: ${core?.channel?.reply ? Object.keys(core.channel.reply).join(",") : "N/A"}`);
-    log?.error?.(`dmwork: session methods: ${core?.channel?.session ? Object.keys(core.channel.session).join(",") : "N/A"}`);
-    log?.error?.(`dmwork: routing methods: ${core?.channel?.routing ? Object.keys(core.channel.routing).join(",") : "N/A"}`);
-    return;
-  }
+  const core = getRuntime();
+  // SDK method availability is guaranteed by probeRuntimeMethods() at startup
   
   const config = core.config.loadConfig() as OpenClawConfig;
 

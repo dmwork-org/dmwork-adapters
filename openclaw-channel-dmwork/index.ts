@@ -7,7 +7,7 @@
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { dmworkPlugin } from "./src/channel.js";
-import { setDmworkRuntime } from "./src/runtime.js";
+import { setRuntime } from "./src/sdk-compat.js";
 import { getGroupMdForPrompt } from "./src/group-md.js";
 
 const plugin: {
@@ -20,7 +20,7 @@ const plugin: {
   name: "DMWork",
   description: "OpenClaw DMWork channel plugin via WuKongIM WebSocket",
   register(api) {
-    setDmworkRuntime(api.runtime);
+    setRuntime(api.runtime);
     api.registerChannel({ plugin: dmworkPlugin });
 
     console.log('[dmwork] registering before_prompt_build hook');
