@@ -78,35 +78,21 @@ publish_npm_dev:
     url: https://www.npmjs.com/package/openclaw-channel-dmwork
 
 # ============================================================
-# 发布到 npm - latest 版本（main 分支）
-# 版本号直接从 package.json 读取
-# ============================================================
-publish_npm_stable:
-  <<: *publish
-  only:
-    - main
-  script:
-    - echo "🏗️ Building for stable publish..."
-    - npm run build
-    - CURRENT_VERSION=$(node -p "require('./package.json').version")
-    - echo "📦 Publishing stable version ${CURRENT_VERSION}"
-    - npm publish --access public --tag latest
-  environment:
-    name: npm
-    url: https://www.npmjs.com/package/openclaw-channel-dmwork
-
-# ============================================================
-# 发布到 npm - latest 版本（tag 触发）
+# 发布到 npm - latest 版本（仅 v* tag 触发）
+# tag 格式: v0.5.21 → 自动写入 package.json 版本号 0.5.21
+# 不再由 main 分支直接触发发布
 # ============================================================
 publish_npm:
   <<: *publish
   only:
-    - tags
+    - /^v\d+\.\d+\.\d+$/
   script:
     - "echo '🏗️ Building for publish...'"
     - "npm run build"
-    - "echo '📦 Publishing version: ${CI_COMMIT_TAG}'"
-    - "npm publish --access public"
+    - "TAG_VERSION=${CI_COMMIT_TAG#v}"
+    - "echo '📦 Publishing version: ${TAG_VERSION}'"
+    - "npm version ${TAG_VERSION} --no-git-tag-version"
+    - "npm publish --access public --tag latest"
   environment:
     name: npm
     url: https://www.npmjs.com/package/openclaw-channel-dmwork
