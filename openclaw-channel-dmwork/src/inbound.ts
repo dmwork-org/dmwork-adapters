@@ -994,6 +994,11 @@ export async function handleInboundMessage(params: {
     return;
   }
 
+  // Normalize channel_type (defense-in-depth — channel.ts should have done this already)
+  if (message.channel_type != null) {
+    message.channel_type = Number(message.channel_type) as ChannelType;
+  }
+
   const isGroup =
     typeof message.channel_id === "string" &&
     message.channel_id.length > 0 &&

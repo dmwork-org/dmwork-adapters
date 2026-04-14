@@ -820,6 +820,11 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         token: credentials.im_token,
 
         onMessage: (msg: BotMessage) => {
+          // Normalize channel_type to number — WuKongIM may send it as string "5"
+          // which breaks strict === comparisons with ChannelType enum values.
+          if (msg.channel_type != null) {
+            msg.channel_type = Number(msg.channel_type) as ChannelType;
+          }
           // Allow structured event messages (e.g. group_md_updated) even from self/bots
           const isEvent = !!(msg.payload as any)?.event?.type; // TODO: remove when SDK types support this
           if (msg.payload?.type === 1 && (msg.payload as any)?.event) { // TODO: remove when SDK types support this
