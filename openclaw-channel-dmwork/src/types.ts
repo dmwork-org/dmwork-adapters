@@ -80,9 +80,11 @@ export interface MessagePayload {
   mention?: MentionPayload;
   reply?: ReplyPayload;
   event?: {
-    type: string;       // "group_md_updated" | "group_md_deleted"
+    type: string;       // "group_md_updated" | "group_md_deleted" | "thread_md_updated" | "thread_md_deleted"
     version?: number;
     updated_by?: string;
+    group_no?: string;   // thread_md_* events only
+    short_id?: string;   // thread_md_* events only
   };
   [key: string]: unknown;
 }
@@ -112,6 +114,7 @@ export interface SendMessageResult {
 export enum ChannelType {
   DM = 1,
   Group = 2,
+  CommunityTopic = 5, // Thread/子区
 }
 
 /** Message content types */
@@ -133,4 +136,10 @@ export interface DMWorkGroupConfig {
   enabled?: boolean;
 }
 
-
+/** Minimal logger interface used across modules. */
+export type LogSink = {
+  info?: (msg: string) => void;
+  error?: (msg: string) => void;
+  warn?: (msg: string) => void;
+  debug?: (msg: string) => void;
+};

@@ -12,10 +12,16 @@ vi.mock("./api-fetch.js", () => ({
   getGroupMembers: vi.fn(),
   getGroupMd: vi.fn(),
   updateGroupMd: vi.fn(),
+  getVoiceContext: vi.fn(),
+  updateVoiceContext: vi.fn(),
+  deleteVoiceContext: vi.fn(),
+  getThreadMd: vi.fn(),
+  updateThreadMd: vi.fn(),
 }));
 
 vi.mock("./group-md.js", () => ({
   broadcastGroupMdUpdate: vi.fn(),
+  broadcastThreadMdUpdate: vi.fn(),
 }));
 
 import { createDmworkManagementTools } from "./agent-tools.js";
@@ -30,8 +36,13 @@ import {
   getGroupMembers,
   getGroupMd,
   updateGroupMd,
+  getVoiceContext,
+  updateVoiceContext,
+  deleteVoiceContext,
+  getThreadMd,
+  updateThreadMd,
 } from "./api-fetch.js";
-import { broadcastGroupMdUpdate } from "./group-md.js";
+import { broadcastGroupMdUpdate, broadcastThreadMdUpdate } from "./group-md.js";
 
 // Minimal config stub — mocked account functions don't inspect it
 const mockCfg = { channels: { dmwork: { botToken: "tok-secret" } } } as any;
@@ -280,6 +291,7 @@ describe("createDmworkManagementTools", () => {
   // -----------------------------------------------------------------------
   describe("accountId resolution", () => {
     it("uses provided accountId", async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["default", "acct2"]);
       vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => ({
         accountId: accountId ?? "default",
         enabled: true,
@@ -308,6 +320,52 @@ describe("createDmworkManagementTools", () => {
       expect(fetchBotGroups).toHaveBeenCalledWith({
         apiUrl: "http://api.test",
         botToken: "tok-secret",
+      });
+    });
+
+    it("multi-account: falls back to first account when no accountId and no default", async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["bot-a", "bot-b"]);
+      vi.mocked(resolveDefaultDmworkAccountId).mockReturnValue(null as any);
+      vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => ({
+        accountId,
+        enabled: true,
+        configured: true,
+        config: {
+          botToken: `tok-${accountId}`,
+          apiUrl: `http://api-${accountId}.test`,
+          pollIntervalMs: 2000,
+          heartbeatIntervalMs: 30000,
+        },
+      }));
+      vi.mocked(fetchBotGroups).mockResolvedValue([]);
+      const execute = getExecute();
+      await execute("tc", { action: "list-groups" });
+      expect(fetchBotGroups).toHaveBeenCalledWith({
+        apiUrl: "http://api-bot-a.test",
+        botToken: "tok-bot-a",
+      });
+    });
+
+    it('multi-account: accountId="default" falls back to first account', async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["bot-a", "bot-b"]);
+      vi.mocked(resolveDefaultDmworkAccountId).mockReturnValue(null as any);
+      vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => ({
+        accountId,
+        enabled: true,
+        configured: true,
+        config: {
+          botToken: `tok-${accountId}`,
+          apiUrl: `http://api-${accountId}.test`,
+          pollIntervalMs: 2000,
+          heartbeatIntervalMs: 30000,
+        },
+      }));
+      vi.mocked(fetchBotGroups).mockResolvedValue([]);
+      const execute = getExecute();
+      await execute("tc", { action: "list-groups", accountId: "default" });
+      expect(fetchBotGroups).toHaveBeenCalledWith({
+        apiUrl: "http://api-bot-a.test",
+        botToken: "tok-bot-a",
       });
     });
 
@@ -399,6 +457,563 @@ describe("createDmworkManagementTools", () => {
       });
       const result = await execute("tc", { action: "list-groups" });
       expect(result.content[0].text).not.toContain("tok-secret");
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // voice-context actions
+  // -----------------------------------------------------------------------
+  describe("voice-context actions", () => {
+    // -- Schema tests --
+
+    it("tool schema includes voice-context-* actions", () => {
+      const tools = createDmworkManagementTools({ cfg: mockCfg });
+      const schema = tools[0].parameters;
+      const actionEnum = schema.properties.action.enum;
+      expect(actionEnum).toContain("voice-context-read");
+      expect(actionEnum).toContain("voice-context-update");
+      expect(actionEnum).toContain("voice-context-delete");
+    });
+
+    it("tool description mentions voice correction context", () => {
+      const tools = createDmworkManagementTools({ cfg: mockCfg });
+      expect(tools[0].description).toContain("voice correction context");
+    });
+
+    // Token leak prevention
+    it("tool schema does not contain botToken", () => {
+      const tools = createDmworkManagementTools({ cfg: mockCfg });
+      const schema = JSON.stringify(tools[0].parameters);
+      expect(schema).not.toContain("botToken");
+      expect(schema).not.toContain("tok-secret");
+    });
+
+    // -- voice-context-read tests --
+
+    it("voice-context-read returns normalized result", async () => {
+      vi.mocked(getVoiceContext).mockResolvedValue({
+        has_context: true,
+        context: "correction terms",
+        updated_at: "2026-04-09T13:00:00+08:00",
+      });
+
+      const result = await getExecute()("tc", { action: "voice-context-read" });
+      const parsed = JSON.parse(result.content[0].text);
+
+      expect(parsed.has_context).toBe(true);
+      expect(parsed.context).toBe("correction terms");
+      expect(parsed.updated_at).toBe("2026-04-09T13:00:00+08:00");
+      // No status field in result
+      expect(parsed.status).toBeUndefined();
+    });
+
+    it("voice-context-read calls getVoiceContext with correct params", async () => {
+      vi.mocked(getVoiceContext).mockResolvedValue({
+        has_context: false,
+        context: "",
+        updated_at: "",
+      });
+
+      await getExecute()("tc", { action: "voice-context-read" });
+
+      expect(getVoiceContext).toHaveBeenCalledWith({
+        apiUrl: "http://api.test",
+        botToken: "tok-secret",
+      });
+    });
+
+    it("voice-context-read result does not leak botToken", async () => {
+      vi.mocked(getVoiceContext).mockResolvedValue({
+        has_context: true,
+        context: "terms",
+        updated_at: "",
+      });
+
+      const result = await getExecute()("tc", { action: "voice-context-read" });
+      expect(result.content[0].text).not.toContain("tok-secret");
+    });
+
+    it("voice-context-read wraps API errors in makeError", async () => {
+      vi.mocked(getVoiceContext).mockRejectedValue(
+        new Error("Bot API GET /v1/bot/voice/context failed (401): invalid token"),
+      );
+
+      const result = await getExecute()("tc", { action: "voice-context-read" });
+      const parsed = JSON.parse(result.content[0].text);
+
+      expect(parsed.error).toContain("voice-context-read failed");
+      // Error must not leak token
+      expect(parsed.error).not.toContain("tok-secret");
+    });
+
+    // -- voice-context-update tests --
+
+    it("voice-context-update succeeds with valid content", async () => {
+      vi.mocked(updateVoiceContext).mockResolvedValue(undefined);
+
+      const result = await getExecute()("tc", {
+        action: "voice-context-update",
+        content: "new correction terms",
+      });
+      const parsed = JSON.parse(result.content[0].text);
+
+      expect(parsed.updated).toBe(true);
+      expect(updateVoiceContext).toHaveBeenCalledWith({
+        apiUrl: "http://api.test",
+        botToken: "tok-secret",
+        content: "new correction terms",
+      });
+    });
+
+    // Empty string rejection tests
+
+    it("voice-context-update rejects undefined content", async () => {
+      const result = await getExecute()("tc", {
+        action: "voice-context-update",
+        // content not provided
+      });
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.error).toContain("must not be empty");
+      expect(updateVoiceContext).not.toHaveBeenCalled();
+    });
+
+    it("voice-context-update rejects null content", async () => {
+      const result = await getExecute()("tc", {
+        action: "voice-context-update",
+        content: null,
+      });
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.error).toContain("must not be empty");
+      expect(updateVoiceContext).not.toHaveBeenCalled();
+    });
+
+    it("voice-context-update rejects empty string content", async () => {
+      const result = await getExecute()("tc", {
+        action: "voice-context-update",
+        content: "",
+      });
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.error).toContain("must not be empty");
+      expect(updateVoiceContext).not.toHaveBeenCalled();
+    });
+
+    it("voice-context-update rejects whitespace-only content", async () => {
+      const result = await getExecute()("tc", {
+        action: "voice-context-update",
+        content: "   \t\n  ",
+      });
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.error).toContain("must not be empty");
+      expect(updateVoiceContext).not.toHaveBeenCalled();
+    });
+
+    it("voice-context-update wraps API errors", async () => {
+      vi.mocked(updateVoiceContext).mockRejectedValue(
+        new Error("Bot API PUT /v1/bot/voice/context failed (400): context exceeds max length"),
+      );
+
+      const result = await getExecute()("tc", {
+        action: "voice-context-update",
+        content: "x".repeat(10001),
+      });
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.error).toContain("voice-context-update failed");
+    });
+
+    // -- voice-context-delete tests --
+
+    it("voice-context-delete succeeds", async () => {
+      vi.mocked(deleteVoiceContext).mockResolvedValue(undefined);
+
+      const result = await getExecute()("tc", { action: "voice-context-delete" });
+      const parsed = JSON.parse(result.content[0].text);
+
+      expect(parsed.deleted).toBe(true);
+      expect(deleteVoiceContext).toHaveBeenCalledWith({
+        apiUrl: "http://api.test",
+        botToken: "tok-secret",
+      });
+    });
+
+    it("voice-context-delete wraps API errors", async () => {
+      vi.mocked(deleteVoiceContext).mockRejectedValue(
+        new Error("Bot API DELETE /v1/bot/voice/context failed (401): invalid token"),
+      );
+
+      const result = await getExecute()("tc", { action: "voice-context-delete" });
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.error).toContain("voice-context-delete failed");
+    });
+
+    // Multi-account tests
+
+    it("voice-context-read uses specified accountId", async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["primary", "secondary"]);
+      vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => {
+        if (accountId === "secondary") {
+          return {
+            accountId: "secondary",
+            enabled: true,
+            configured: true,
+            config: {
+              apiUrl: "http://api-secondary.test",
+              botToken: "tok-secondary",
+              pollIntervalMs: 2000,
+              heartbeatIntervalMs: 30000,
+            },
+          } as any;
+        }
+        return {
+          accountId: "primary",
+          enabled: true,
+          configured: true,
+          config: {
+            apiUrl: "http://api.test",
+            botToken: "tok-secret",
+            pollIntervalMs: 2000,
+            heartbeatIntervalMs: 30000,
+          },
+        } as any;
+      });
+
+      vi.mocked(getVoiceContext).mockResolvedValue({
+        has_context: false,
+        context: "",
+        updated_at: "",
+      });
+
+      await getExecute()("tc", {
+        action: "voice-context-read",
+        accountId: "secondary",
+      });
+
+      expect(getVoiceContext).toHaveBeenCalledWith({
+        apiUrl: "http://api-secondary.test",
+        botToken: "tok-secondary",
+      });
+    });
+
+    it("voice-context-update uses specified accountId", async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["primary", "secondary"]);
+      vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => {
+        if (accountId === "secondary") {
+          return {
+            accountId: "secondary",
+            enabled: true,
+            configured: true,
+            config: {
+              apiUrl: "http://api-secondary.test",
+              botToken: "tok-secondary",
+              pollIntervalMs: 2000,
+              heartbeatIntervalMs: 30000,
+            },
+          } as any;
+        }
+        return {
+          accountId: "primary",
+          enabled: true,
+          configured: true,
+          config: {
+            apiUrl: "http://api.test",
+            botToken: "tok-secret",
+            pollIntervalMs: 2000,
+            heartbeatIntervalMs: 30000,
+          },
+        } as any;
+      });
+
+      vi.mocked(updateVoiceContext).mockResolvedValue(undefined);
+
+      await getExecute()("tc", {
+        action: "voice-context-update",
+        content: "terms",
+        accountId: "secondary",
+      });
+
+      expect(updateVoiceContext).toHaveBeenCalledWith({
+        apiUrl: "http://api-secondary.test",
+        botToken: "tok-secondary",
+        content: "terms",
+      });
+    });
+
+    it("voice-context-delete uses specified accountId", async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["primary", "secondary"]);
+      vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => {
+        if (accountId === "secondary") {
+          return {
+            accountId: "secondary",
+            enabled: true,
+            configured: true,
+            config: {
+              apiUrl: "http://api-secondary.test",
+              botToken: "tok-secondary",
+              pollIntervalMs: 2000,
+              heartbeatIntervalMs: 30000,
+            },
+          } as any;
+        }
+        return {
+          accountId: "primary",
+          enabled: true,
+          configured: true,
+          config: {
+            apiUrl: "http://api.test",
+            botToken: "tok-secret",
+            pollIntervalMs: 2000,
+            heartbeatIntervalMs: 30000,
+          },
+        } as any;
+      });
+
+      vi.mocked(deleteVoiceContext).mockResolvedValue(undefined);
+
+      await getExecute()("tc", {
+        action: "voice-context-delete",
+        accountId: "secondary",
+      });
+
+      expect(deleteVoiceContext).toHaveBeenCalledWith({
+        apiUrl: "http://api-secondary.test",
+        botToken: "tok-secondary",
+      });
+    });
+
+    // Token not leaked on multi-account calls
+    it("multi-account results do not leak secondary botToken", async () => {
+      vi.mocked(resolveDmworkAccount).mockReturnValue({
+        accountId: "secondary",
+        enabled: true,
+        configured: true,
+        config: {
+          apiUrl: "http://api-secondary.test",
+          botToken: "tok-secondary-secret-123",
+          pollIntervalMs: 2000,
+          heartbeatIntervalMs: 30000,
+        },
+      } as any);
+
+      vi.mocked(getVoiceContext).mockResolvedValue({
+        has_context: true,
+        context: "terms",
+        updated_at: "",
+      });
+
+      const result = await getExecute()("tc", {
+        action: "voice-context-read",
+        accountId: "secondary",
+      });
+
+      expect(result.content[0].text).not.toContain("tok-secondary-secret-123");
+    });
+
+    // -- strict accountId validation --
+
+    it("voice-context-read with non-existent accountId returns error", async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["primary", "secondary"]);
+      const execute = getExecute();
+
+      const result = await execute("tc", {
+        action: "voice-context-read",
+        accountId: "nonexistent",
+      });
+      const parsed = JSON.parse(result.content[0].text);
+
+      expect(parsed.error).toContain("Account not found");
+      expect(parsed.error).toContain("nonexistent");
+      expect(getVoiceContext).not.toHaveBeenCalled();
+    });
+
+    it("voice-context-update with non-existent accountId returns error", async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["primary", "secondary"]);
+      const execute = getExecute();
+
+      const result = await execute("tc", {
+        action: "voice-context-update",
+        content: "some terms",
+        accountId: "nonexistent",
+      });
+      const parsed = JSON.parse(result.content[0].text);
+
+      expect(parsed.error).toContain("Account not found");
+      expect(parsed.error).toContain("nonexistent");
+      expect(updateVoiceContext).not.toHaveBeenCalled();
+    });
+
+    it("voice-context-delete with non-existent accountId returns error", async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["primary", "secondary"]);
+      const execute = getExecute();
+
+      const result = await execute("tc", {
+        action: "voice-context-delete",
+        accountId: "nonexistent",
+      });
+      const parsed = JSON.parse(result.content[0].text);
+
+      expect(parsed.error).toContain("Account not found");
+      expect(parsed.error).toContain("nonexistent");
+      expect(deleteVoiceContext).not.toHaveBeenCalled();
+    });
+
+    // -- botToken not configured --
+
+    it("returns error when botToken is not configured", async () => {
+      const execute = getExecute();
+      // After tool creation, change mock so execute sees no botToken
+      vi.mocked(resolveDmworkAccount).mockReturnValue({
+        accountId: "no-token",
+        enabled: true,
+        configured: true,
+        config: {
+          apiUrl: "http://api.test",
+          botToken: "",
+          pollIntervalMs: 2000,
+          heartbeatIntervalMs: 30000,
+        },
+      } as any);
+
+      const result = await execute("tc", { action: "voice-context-read" });
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.error).toContain("botToken is not configured");
+    });
+
+    // No alias for voice-context actions
+
+    it("voice-context-* actions do not accept aliases", async () => {
+      // Action name must be exact
+      const result = await getExecute()("tc", { action: "voice-read" });
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.error).toContain("Unknown action");
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // thread-md-read
+  // -----------------------------------------------------------------------
+  describe("execute — thread-md-read", () => {
+    it("returns THREAD.md content on success", async () => {
+      vi.mocked(getThreadMd).mockResolvedValue({
+        content: "# Sprint 42",
+        version: 2,
+        updated_at: "2026-04-13",
+        updated_by: "user1",
+      });
+      const result = await getExecute()("tc", {
+        action: "thread-md-read",
+        groupId: "g1",
+        shortId: "thr1",
+      });
+      const data = parseText(result);
+      expect(data.content).toBe("# Sprint 42");
+      expect(data.version).toBe(2);
+    });
+
+    it("returns error when groupId is missing", async () => {
+      const result = await getExecute()("tc", {
+        action: "thread-md-read",
+        shortId: "thr1",
+      });
+      const data = parseText(result);
+      expect(data.error).toContain("groupId");
+    });
+
+    it("returns error when shortId is missing", async () => {
+      const result = await getExecute()("tc", {
+        action: "thread-md-read",
+        groupId: "g1",
+      });
+      const data = parseText(result);
+      expect(data.error).toContain("shortId");
+    });
+
+    it("returns empty content on 404 instead of throwing", async () => {
+      vi.mocked(getThreadMd).mockRejectedValue(new Error("getThreadMd failed (404): not found"));
+      const result = await getExecute()("tc", {
+        action: "thread-md-read",
+        groupId: "g1",
+        shortId: "thr1",
+      });
+      const data = parseText(result);
+      expect(data.content).toBe("");
+      expect(data.version).toBe(0);
+    });
+
+    it("returns error on non-404 API failure", async () => {
+      vi.mocked(getThreadMd).mockRejectedValue(new Error("getThreadMd failed (500): internal"));
+      const result = await getExecute()("tc", {
+        action: "thread-md-read",
+        groupId: "g1",
+        shortId: "thr1",
+      });
+      const data = parseText(result);
+      expect(data.error).toContain("Failed to read thread THREAD.md");
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // thread-md-update
+  // -----------------------------------------------------------------------
+  describe("execute — thread-md-update", () => {
+    it("updates and calls broadcastThreadMdUpdate", async () => {
+      vi.mocked(updateThreadMd).mockResolvedValue({ version: 3 });
+      const result = await getExecute()("tc", {
+        action: "thread-md-update",
+        groupId: "g1",
+        shortId: "thr1",
+        content: "# Updated thread",
+      });
+      const data = parseText(result);
+      expect(data.updated).toBe(true);
+      expect(data.version).toBe(3);
+      expect(broadcastThreadMdUpdate).toHaveBeenCalledWith({
+        accountId: "default",
+        groupNo: "g1",
+        shortId: "thr1",
+        content: "# Updated thread",
+        version: 3,
+      });
+    });
+
+    it("returns error when groupId is missing", async () => {
+      const result = await getExecute()("tc", {
+        action: "thread-md-update",
+        shortId: "thr1",
+        content: "# New",
+      });
+      const data = parseText(result);
+      expect(data.error).toContain("groupId");
+    });
+
+    it("returns error when shortId is missing", async () => {
+      const result = await getExecute()("tc", {
+        action: "thread-md-update",
+        groupId: "g1",
+        content: "# New",
+      });
+      const data = parseText(result);
+      expect(data.error).toContain("shortId");
+    });
+
+    it("returns error when content is missing", async () => {
+      const result = await getExecute()("tc", {
+        action: "thread-md-update",
+        groupId: "g1",
+        shortId: "thr1",
+      });
+      const data = parseText(result);
+      expect(data.error).toContain("content");
+    });
+
+    it("returns error on API failure", async () => {
+      vi.mocked(updateThreadMd).mockRejectedValue(new Error("updateThreadMd failed (403): forbidden"));
+      const result = await getExecute()("tc", {
+        action: "thread-md-update",
+        groupId: "g1",
+        shortId: "thr1",
+        content: "# Fail",
+      });
+      const data = parseText(result);
+      expect(data.error).toContain("thread-md-update failed");
     });
   });
 });
