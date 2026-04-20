@@ -7,17 +7,25 @@
 
 import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
+  cleanupBrokenInstall,
+  cleanupLegacyPlugin,
+  cleanupStaleStageDirectories,
   configGet,
   configGetJson,
   configSet,
+  detectScenario,
   gatewayRestart,
   gatewayStatus,
+  getConfigFilePathSafe,
   pluginsInspect,
   pluginsInstall,
   removeChannelConfigFromFile,
   removeOrphanedBindingsFromFile,
   readConfigFromFile,
+  resolvePluginState,
 } from "./openclaw-cli.js";
 import { PLUGIN_ID, RECOMMENDED_DM_SCOPE } from "./utils.js";
 
@@ -97,24 +105,23 @@ export async function runDoctorChecks(params: {
   // Phase 1: Fatal config issues (OpenClaw CLI may not work)
   // =========================================================================
   if (!params.inProcess && fix) {
+    // Phase 0a: Use scenario detection — don't use old destructive cleanupLegacyPlugin()
+    // Legacy and deadlock scenarios are handled in Phase 2 plugin install section
+    // Here we only do non-destructive cleanup: stage directories and orphaned bindings
+
+    // Phase 0b: Clean up stale install stage directories (DMWork only, >10min old)
+    const stageActions = cleanupStaleStageDirectories();
+    for (const action of stageActions) {
+      checks.push({
+        name: "Stage directory cleanup",
+        status: "FIXED",
+        detail: action,
+      });
+    }
+
     const cfg = readConfigFromFile();
     if (cfg) {
       const hasDmworkChannel = Boolean(cfg.channels?.dmwork);
-      // Check if plugin actually exists on disk, not just config records
-      const installPath = cfg.plugins?.installs?.["openclaw-channel-dmwork"]?.installPath;
-      const pluginOnDisk = installPath
-        ? existsSync(installPath.replace(/^~/, process.env.HOME ?? ""))
-        : false;
-
-      // channels.dmwork exists but plugin not on disk → residual config
-      if (hasDmworkChannel && !pluginOnDisk) {
-        removeChannelConfigFromFile();
-        checks.push({
-          name: "Residual channels.dmwork",
-          status: "FIXED",
-          detail: "Removed orphaned channel config (plugin not installed)",
-        });
-      }
 
       // Orphaned dmwork bindings
       const bindings = cfg.bindings as Array<{ agentId: string; match?: { channel?: string; accountId?: string } }> | undefined;
@@ -154,22 +161,48 @@ export async function runDoctorChecks(params: {
   const reader = params.reader ?? cliConfigReader;
 
   // 1. Plugin installed
+  //    Uses resolvePluginState (inspect + fallback) but cross-checks with
+  //    detectScenario() when fallback says not-installed, to avoid hiding
+  //    broken/partial states behind "not installed".
+  let pluginState: import("./openclaw-cli.js").PluginResolvedState | null = null;
   if (!params.inProcess) {
-    const inspect = pluginsInspect(PLUGIN_ID);
-    if (inspect?.plugin) {
+    pluginState = resolvePluginState(PLUGIN_ID);
+
+    if (pluginState.installed) {
+      // Healthy via inspect or fallback (all 3 artifacts present)
+      const versionLabel = pluginState.version ? `v${pluginState.version}` : "version unknown";
+      let sourceNote = "";
+      if (pluginState.source === "fallback" && pluginState.inspectFailReason === "unsupported") {
+        sourceNote = " (fallback; plugins inspect unsupported on this OpenClaw version)";
+      } else if (pluginState.source === "fallback") {
+        sourceNote = " (fallback; plugins inspect failed)";
+      }
       checks.push({
         name: "Plugin installed",
         status: "PASS",
-        detail: `v${inspect.plugin.version}`,
+        detail: `${versionLabel}${sourceNote}`,
       });
     } else if (fix) {
+      // Not installed (or broken/partial). Use detectScenario() for precise fix.
       try {
-        pluginsInstall(PLUGIN_ID, true);
-        const after = pluginsInspect(PLUGIN_ID);
+        const scenario = detectScenario();
+        if (scenario === "legacy") {
+          const { runLegacyMigrationForUpdate } = await import("./install.js");
+          runLegacyMigrationForUpdate(PLUGIN_ID, true);
+        } else if (scenario === "deadlock") {
+          const { runDeadlockRepairForUpdate } = await import("./install.js");
+          runDeadlockRepairForUpdate(PLUGIN_ID, true);
+        } else if (scenario === "broken") {
+          cleanupBrokenInstall();
+          pluginsInstall(PLUGIN_ID, true);
+        } else {
+          pluginsInstall(PLUGIN_ID, true);
+        }
+        pluginState = resolvePluginState(PLUGIN_ID);
         checks.push({
           name: "Plugin installed",
           status: "FIXED",
-          detail: `Installed v${after?.plugin?.version ?? "unknown"}`,
+          detail: `Installed v${pluginState.version ?? "unknown"}`,
         });
       } catch {
         checks.push({
@@ -208,18 +241,18 @@ export async function runDoctorChecks(params: {
     }
   }
 
-  // 3. node_modules check
+  // 3. node_modules check (uses installPath from resolvePluginState)
   if (!params.inProcess) {
-    const inspect = pluginsInspect(PLUGIN_ID);
-    const installPath = inspect?.install?.installPath;
+    const installPath = pluginState?.installPath;
     if (installPath) {
-      const nmPath = installPath.replace(/^~/, process.env.HOME ?? "") + "/node_modules";
+      const resolvedPath = installPath.replace(/^~/, process.env.HOME ?? "");
+      const nmPath = resolvedPath + "/node_modules";
       if (existsSync(nmPath)) {
         checks.push({ name: "Dependencies", status: "PASS", detail: "node_modules exists" });
       } else if (fix) {
         try {
           execFileSync("npm", ["install", "--production", "--ignore-scripts"], {
-            cwd: installPath.replace(/^~/, process.env.HOME ?? ""),
+            cwd: resolvedPath,
             stdio: ["pipe", "pipe", "pipe"],
           });
           checks.push({ name: "Dependencies", status: "FIXED", detail: "npm install completed" });

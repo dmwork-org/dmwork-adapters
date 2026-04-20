@@ -196,7 +196,6 @@ export async function sendMessage(params: {
   mentionUids?: string[];
   mentionEntities?: MentionEntity[];
   mentionAll?: boolean;
-  streamNo?: string;
   replyMsgId?: string;
   signal?: AbortSignal;
 }): Promise<void> {
@@ -229,7 +228,6 @@ export async function sendMessage(params: {
   await postJson(params.apiUrl, params.botToken, "/v1/bot/sendMessage", {
     channel_id: params.channelId,
     channel_type: params.channelType,
-    ...(params.streamNo ? { stream_no: params.streamNo } : {}),
     payload,
   }, params.signal);
 }
@@ -276,6 +274,9 @@ export async function registerBot(params: {
   apiUrl: string;
   botToken: string;
   forceRefresh?: boolean;
+  agentPlatform?: string;
+  agentVersion?: string;
+  pluginVersion?: string;
   signal?: AbortSignal;
 }): Promise<{
   robot_id: string;
@@ -288,6 +289,10 @@ export async function registerBot(params: {
   const path = params.forceRefresh
     ? "/v1/bot/register?force_refresh=true"
     : "/v1/bot/register";
+  const body: Record<string, string> = {};
+  if (params.agentPlatform) body.agent_platform = params.agentPlatform;
+  if (params.agentVersion) body.agent_version = params.agentVersion;
+  if (params.pluginVersion) body.plugin_version = params.pluginVersion;
   const result = await postJson<{
     robot_id: string;
     im_token: string;
@@ -295,7 +300,7 @@ export async function registerBot(params: {
     api_url: string;
     owner_uid: string;
     owner_channel_id: string;
-  }>(params.apiUrl, params.botToken, path, {}, params.signal);
+  }>(params.apiUrl, params.botToken, path, body, params.signal);
   if (!result) throw new Error("DMWork bot registration returned empty response");
   return result;
 }
@@ -729,6 +734,27 @@ export async function getUploadCredentials(params: {
   return data;
 }
 
+/** Characters unsafe in a Content-Disposition filename="..." value. */
+const CD_UNSAFE_RE = /["\\\x00-\x1F\x7F;]/;
+
+export function rfc5987Encode(s: string): string {
+  return encodeURIComponent(s).replace(/['()*]/g, c =>
+    '%' + c.charCodeAt(0).toString(16).toUpperCase()
+  );
+}
+
+export function buildContentDisposition(
+  filename: string,
+  type: 'attachment' | 'inline' = 'attachment',
+): string {
+  const isAsciiSafe = /^[\x20-\x7E]+$/.test(filename) && !CD_UNSAFE_RE.test(filename);
+  if (isAsciiSafe) {
+    return `${type}; filename="${filename}"`;
+  }
+  const ext = filename.includes('.') ? '.' + filename.split('.').pop() : '';
+  return `${type}; filename="download${ext}"; filename*=UTF-8''${rfc5987Encode(filename)}`;
+}
+
 /**
  * Upload a file directly to COS using STS temporary credentials.
  */
@@ -747,6 +773,7 @@ export async function uploadFileToCOS(params: {
   fileSize?: number;
   contentType: string;
   cdnBaseUrl?: string;
+  filename?: string;
 }): Promise<{ url: string }> {
   const cos = new COS({
     SecretId: params.credentials.tmpSecretId,
@@ -756,12 +783,23 @@ export async function uploadFileToCOS(params: {
     ExpiredTime: params.expiredTime,
   } as any);
 
+  let contentDisposition: string | undefined;
+  if (params.filename) {
+    const ct = params.contentType;
+    if (ct.startsWith('video/') || ct.startsWith('audio/')) {
+      contentDisposition = buildContentDisposition(params.filename, 'inline');
+    } else if (!ct.startsWith('image/')) {
+      contentDisposition = buildContentDisposition(params.filename, 'attachment');
+    }
+  }
+
   const putParams: Record<string, unknown> = {
     Bucket: params.bucket,
     Region: params.region,
     Key: params.key,
     Body: params.fileBody,
     ContentType: params.contentType,
+    ...(contentDisposition && { ContentDisposition: contentDisposition }),
   };
   if (params.fileSize != null) {
     putParams.ContentLength = params.fileSize;
