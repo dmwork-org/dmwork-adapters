@@ -380,6 +380,11 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
   },
   outbound: {
     deliveryMode: "direct",
+    // Mark block-phase text as visible so the framework skips re-sending it during final phase.
+    // This prevents duplicate messages when multi-turn tool calls produce multiple assistant replies.
+    ...({ shouldTreatDeliveredTextAsVisible: (params: { kind: string; text?: string }) =>
+      params.kind === "block" && typeof params.text === "string" && params.text.trim().length > 0,
+    } as Record<string, unknown>),
     sendText: async (ctx) => {
       // Resolve correct accountId — framework may pass wrong one for multi-bot setups
       const accountId = resolveOutboundAccountId(
