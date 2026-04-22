@@ -189,6 +189,12 @@ export async function parseImageDimensionsFromFile(filePath: string, mime: strin
   return null;
 }
 
+export interface SendMessageResult {
+  message_id: string;
+  client_msg_no: string;
+  message_seq: number;
+}
+
 export async function sendMessage(params: {
   apiUrl: string;
   botToken: string;
@@ -200,7 +206,7 @@ export async function sendMessage(params: {
   mentionAll?: boolean;
   replyMsgId?: string;
   signal?: AbortSignal;
-}): Promise<void> {
+}): Promise<SendMessageResult> {
   const payload: Record<string, unknown> = {
     type: MessageType.Text,
     content: params.content,
@@ -227,11 +233,12 @@ export async function sendMessage(params: {
   if (params.replyMsgId) {
     payload.reply = { message_id: params.replyMsgId };
   }
-  await postJson(params.apiUrl, params.botToken, "/v1/bot/sendMessage", {
+  const result = await postJson<SendMessageResult>(params.apiUrl, params.botToken, "/v1/bot/sendMessage", {
     channel_id: params.channelId,
     channel_type: params.channelType,
     payload,
   }, params.signal);
+  return result ?? { message_id: '0', client_msg_no: '', message_seq: 0 };
 }
 
 export async function sendTyping(params: {

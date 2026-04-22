@@ -11,7 +11,7 @@ import {
   resolveDmworkAccount,
   type ResolvedDmworkAccount,
 } from "./accounts.js";
-import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContentType, ensureTextCharset, fetchBotGroups, getGroupMd, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
+import { registerBot, sendMessage, editMessage, sendHeartbeat, sendMediaMessage, inferContentType, ensureTextCharset, fetchBotGroups, getGroupMd, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS, type SendMessageResult } from "./api-fetch.js";
 import { PLUGIN_VERSION } from "./version.js";
 import { getDmworkRuntime } from "./runtime.js";
 
@@ -43,6 +43,27 @@ import { Readable } from "node:stream";
 // HistoryEntry type - compatible with any version
 type HistoryEntry = { sender: string; body: string; timestamp: number };
 const DEFAULT_GROUP_HISTORY_LIMIT = 20;
+
+// Draft message tracking for stream dedup — edits existing message instead of sending new one
+const DRAFT_TTL_MS = 60_000; // 60 seconds
+
+const draftMessages = new Map<string, {
+  messageId: string;
+  messageSeq: number;
+  channelId: string;
+  channelType: number;
+  text: string;
+  timestamp: number;
+}>();
+
+function cleanupStaleDrafts(): void {
+  const cutoff = Date.now() - DRAFT_TTL_MS;
+  for (const [key, draft] of draftMessages) {
+    if (draft.timestamp < cutoff) {
+      draftMessages.delete(key);
+    }
+  }
+}
 
 const MAX_UPLOAD_SIZE = 500 * 1024 * 1024; // 500 MB
 const UPLOAD_TEMP_DIR = path.join("/tmp", "dmwork-upload");
@@ -458,18 +479,74 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       // Detect @all/@所有人 in content
       const hasAtAll = /(?:^|(?<=\s))@(?:all|所有人)(?=\s|[^\w]|$)/i.test(finalContent);
 
-      await sendMessage({
-        apiUrl: account.config.apiUrl,
-        botToken: account.config.botToken,
-        channelId,
-        channelType,
-        content: finalContent,
-        ...(mentionUids.length > 0 ? { mentionUids } : {}),
-        ...(mentionEntities.length > 0 ? { mentionEntities } : {}),
-        mentionAll: hasAtAll || undefined,
-      });
+      // Draft-stream dedup: edit existing draft message if one exists for this target
+      cleanupStaleDrafts();
+      const draftKey = `${channelId}:${channelType}`;
+      const existingDraft = draftMessages.get(draftKey);
+      let resultMessageId = "";
 
-      return { channel: "dmwork", to: ctx.to, messageId: "" };
+      if (existingDraft && (Date.now() - existingDraft.timestamp) < DRAFT_TTL_MS) {
+        // Try to edit the existing draft message
+        try {
+          await editMessage({
+            apiUrl: account.config.apiUrl,
+            botToken: account.config.botToken,
+            messageId: existingDraft.messageId,
+            messageSeq: existingDraft.messageSeq,
+            channelId,
+            channelType,
+            contentEdit: finalContent,
+          });
+          existingDraft.text = finalContent;
+          existingDraft.timestamp = Date.now();
+          resultMessageId = existingDraft.messageId;
+        } catch {
+          // Edit failed — fall back to sending a new message
+          draftMessages.delete(draftKey);
+          const result = await sendMessage({
+            apiUrl: account.config.apiUrl,
+            botToken: account.config.botToken,
+            channelId,
+            channelType,
+            content: finalContent,
+            ...(mentionUids.length > 0 ? { mentionUids } : {}),
+            ...(mentionEntities.length > 0 ? { mentionEntities } : {}),
+            mentionAll: hasAtAll || undefined,
+          });
+          draftMessages.set(draftKey, {
+            messageId: String(result.message_id),
+            messageSeq: result.message_seq,
+            channelId,
+            channelType,
+            text: finalContent,
+            timestamp: Date.now(),
+          });
+          resultMessageId = String(result.message_id);
+        }
+      } else {
+        // No active draft — send a new message and track it
+        const result = await sendMessage({
+          apiUrl: account.config.apiUrl,
+          botToken: account.config.botToken,
+          channelId,
+          channelType,
+          content: finalContent,
+          ...(mentionUids.length > 0 ? { mentionUids } : {}),
+          ...(mentionEntities.length > 0 ? { mentionEntities } : {}),
+          mentionAll: hasAtAll || undefined,
+        });
+        draftMessages.set(draftKey, {
+          messageId: String(result.message_id),
+          messageSeq: result.message_seq,
+          channelId,
+          channelType,
+          text: finalContent,
+          timestamp: Date.now(),
+        });
+        resultMessageId = String(result.message_id);
+      }
+
+      return { channel: "dmwork", to: ctx.to, messageId: resultMessageId };
     },
     sendMedia: async (ctx) => {
       // Resolve correct accountId — framework may pass wrong one for multi-bot setups
