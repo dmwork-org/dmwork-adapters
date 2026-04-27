@@ -17,6 +17,8 @@ import { resolve } from "node:path";
  * causes version incompatibility crashes on older OpenClaw servers.
  */
 function findGlobalOpenclaw(): string {
+  const isWindows = process.platform === "win32";
+
   // Strategy 1: use "which -a" (Unix) or "where" (Windows) to find all openclaw paths
   // Skip: _npx (npx cache), npx-cache, node_modules (project-local devDependency)
   for (const cmd of ["which -a openclaw", "where openclaw"]) {
@@ -34,13 +36,51 @@ function findGlobalOpenclaw(): string {
           !p.includes("npx-cache") &&
           !p.includes("node_modules"),
         );
-      if (paths.length > 0) return paths[0];
+      if (paths.length > 0) {
+        // On Windows, `where openclaw` may return both the extensionless shim
+        // and `openclaw.cmd`. Prefer `.cmd`, otherwise execFileSync may hit
+        // ENOENT for the extensionless path.
+        if (isWindows) {
+          const cmdShim = paths.find((p) => /\.cmd$/i.test(p));
+          if (cmdShim) return cmdShim;
+        }
+        return paths[0];
+      }
     } catch {
       // command not available on this platform
     }
   }
 
-  // Strategy 2: check common global install paths
+  // Strategy 2 (Windows): npm global prefix + openclaw.cmd
+  // npm i -g openclaw 在 Windows 上生成 .ps1 和 .cmd，但 npx 子进程的 PATH
+  // 可能不包含 npm 全局目录，导致 where 找不到。通过 npm prefix 定位。
+  // 注意：npm 本身也是 .cmd，必须通过 resolveCommand 找到再用 cmd.exe 执行。
+  if (isWindows) {
+    try {
+      const npmResolved = resolveCommand("npm");
+      let prefix: string;
+      if (/\.cmd$/i.test(npmResolved)) {
+        const comspec = process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe";
+        prefix = execFileSync(comspec, ["/d", "/v:off", "/c", "call", npmResolved, "config", "get", "prefix"], {
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+        }).trim();
+      } else {
+        prefix = execSync("npm config get prefix", {
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+        }).trim();
+      }
+      if (prefix) {
+        const cmdPath = resolve(prefix, "openclaw.cmd");
+        if (existsSync(cmdPath)) return cmdPath;
+      }
+    } catch {
+      // npm not available
+    }
+  }
+
+  // Strategy 3: check common global install paths
   const candidates = [
     "/opt/homebrew/bin/openclaw",
     "/usr/local/bin/openclaw",
@@ -55,17 +95,87 @@ function findGlobalOpenclaw(): string {
   return "openclaw";
 }
 
+const IS_WINDOWS = process.platform === "win32";
+
+/**
+ * Resolve a command name to its .cmd shim on Windows.
+ * On Windows, `where.exe <cmd>` may return both a bare file and a .cmd;
+ * execFileSync cannot execute the bare file (ENOENT), so we prefer .cmd.
+ */
+function resolveCommand(name: string): string {
+  if (IS_WINDOWS) {
+    try {
+      const output = execSync(`where.exe ${name}`, {
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      const paths = output.split(/\r?\n/).map((p) => p.trim()).filter((p) => p.length > 0);
+      const cmdShim = paths.find((p) => /\.cmd$/i.test(p));
+      if (cmdShim) return cmdShim;
+      if (paths.length > 0) return paths[0];
+    } catch { /* not found via where */ }
+  }
+  return name;
+}
+
+/**
+ * Execute an external command, compatible with Windows .cmd shims.
+ * On Windows, .cmd files are executed via cmd.exe /d /s /c explicitly.
+ * All external command invocations (openclaw, npm, etc.) should use this.
+ */
+function escapeCmdArg(a: string): string {
+  let s = a.replace(/%/g, "%%");
+  if (/[&|<>^()"\s]/.test(s)) {
+    s = `"${s.replace(/"/g, '""')}"`;
+  }
+  return s;
+}
+
+function escapeCmdArgs(args: string[]): string[] {
+  return args.map(escapeCmdArg);
+}
+
+export function runCmd(command: string, args: string[], opts: Record<string, unknown> = {}): string {
+  const resolved = resolveCommand(command);
+  if (IS_WINDOWS && /\.cmd$/i.test(resolved)) {
+    const comspec = process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe";
+    return execFileSync(comspec, ["/d", "/v:off", "/c", "call", resolved, ...escapeCmdArgs(args)], { encoding: "utf-8", ...opts } as any) as unknown as string;
+  }
+  return execFileSync(resolved, args, { encoding: "utf-8", ...opts } as any) as unknown as string;
+}
+
 const OPENCLAW = findGlobalOpenclaw();
+const NEEDS_SHELL = IS_WINDOWS && /\.cmd$/i.test(OPENCLAW);
+
+/**
+ * Execute openclaw CLI command. Wrapper with pre-resolved path.
+ */
+function runOpenclaw(args: string[], opts: Record<string, unknown> = {}): string {
+  if (NEEDS_SHELL) {
+    const comspec = process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe";
+    return execFileSync(comspec, ["/d", "/v:off", "/c", "call", OPENCLAW, ...escapeCmdArgs(args)], { encoding: "utf-8", ...opts } as any) as unknown as string;
+  }
+  return execFileSync(OPENCLAW, args, { encoding: "utf-8", ...opts } as any) as unknown as string;
+}
 
 /** Get the resolved openclaw binary path */
 export function getOpenClawBin(): string {
   return OPENCLAW;
 }
 
-/** Expand ~ to home directory */
-function expandHome(p: string): string {
+/** Execute openclaw command (exported for quickstart.ts etc.) */
+export { runOpenclaw };
+
+/** Normalize config path: expand ~ and resolve Windows relative paths */
+function normalizeConfigPath(p: string): string {
   if (p.startsWith("~/")) return resolve(homedir(), p.slice(2));
-  return p;
+  if (p.startsWith("~\\")) return resolve(homedir(), p.slice(2));
+  // Windows relative path like .\.openclaw\openclaw.json → resolve to home
+  if (/^\.[\\/]\.openclaw[\\/]/.test(p)) return resolve(homedir(), p.slice(2));
+  // Already absolute → use as-is
+  if (resolve(p) === p) return p;
+  // Other relative paths → resolve from home (safest assumption for config)
+  return resolve(homedir(), p);
 }
 
 // ---------------------------------------------------------------------------
@@ -73,7 +183,7 @@ function expandHome(p: string): string {
 // ---------------------------------------------------------------------------
 
 export function getConfigFilePath(): string {
-  const out = execFileSync(OPENCLAW, ["config", "file"], { encoding: "utf-8" });
+  const out = runOpenclaw(["config", "file"]);
   // openclaw may prepend warnings/box-drawing to stdout; extract the actual path
   // The path is typically the last non-empty line containing openclaw.json
   const lines = out.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
@@ -105,8 +215,7 @@ function stripStdoutNoise(raw: string): string {
 
 export function configGet(path: string): string | null {
   try {
-    const raw = execFileSync(OPENCLAW, ["config", "get", path], {
-      encoding: "utf-8",
+    const raw = runOpenclaw(["config", "get", path], {
       stdio: ["pipe", "pipe", "pipe"],
     });
     const val = stripStdoutNoise(raw);
@@ -118,8 +227,7 @@ export function configGet(path: string): string | null {
 
 export function configGetJson(path: string): any {
   try {
-    const out = execFileSync(OPENCLAW, ["config", "get", path, "--json"], {
-      encoding: "utf-8",
+    const out = runOpenclaw(["config", "get", path, "--json"], {
       stdio: ["pipe", "pipe", "pipe"],
     });
     const jsonStart = out.indexOf("{");
@@ -145,7 +253,7 @@ export function configGetJson(path: string): any {
 }
 
 export function configSet(path: string, value: string): void {
-  execFileSync(OPENCLAW, ["config", "set", path, value], {
+  runOpenclaw(["config", "set", path, value], {
     stdio: ["pipe", "pipe", "pipe"],
   });
 }
@@ -156,19 +264,19 @@ export function configSetBatch(
   const batchJson = JSON.stringify(
     operations.map((op) => ({ path: op.path, value: op.value })),
   );
-  execFileSync(OPENCLAW, ["config", "set", "--batch-json", batchJson], {
+  runOpenclaw(["config", "set", "--batch-json", batchJson], {
     stdio: ["pipe", "pipe", "pipe"],
   });
 }
 
 export function configSetJson(path: string, value: unknown): void {
-  execFileSync(OPENCLAW, ["config", "set", path, JSON.stringify(value), "--strict-json"], {
+  runOpenclaw(["config", "set", path, JSON.stringify(value), "--strict-json"], {
     stdio: ["pipe", "pipe", "pipe"],
   });
 }
 
 export function configUnset(path: string): void {
-  execFileSync(OPENCLAW, ["config", "unset", path], {
+  runOpenclaw(["config", "unset", path], {
     stdio: ["pipe", "pipe", "pipe"],
   });
 }
@@ -228,7 +336,7 @@ export function pluginsInstall(spec: string, quiet?: boolean, force?: boolean): 
   // making isUnsupportedOptionError() unable to detect "unknown option".
   for (let i = 0; i < attempts.length; i++) {
     try {
-      const result = execFileSync(OPENCLAW, attempts[i], {
+      const result = runOpenclaw(attempts[i], {
         stdio: ["pipe", "pipe", "pipe"],
         encoding: "utf-8",
       });
@@ -251,7 +359,7 @@ export function pluginsInstall(spec: string, quiet?: boolean, force?: boolean): 
 }
 
 export function pluginsUpdate(id: string, quiet?: boolean): void {
-  const result = execFileSync(OPENCLAW, ["plugins", "update", id], {
+  const result = runOpenclaw(["plugins", "update", id], {
     stdio: ["pipe", "pipe", "pipe"],
     encoding: "utf-8",
   });
@@ -261,7 +369,7 @@ export function pluginsUpdate(id: string, quiet?: boolean): void {
 export function pluginsUninstall(id: string, yes?: boolean): void {
   const args = ["plugins", "uninstall", id];
   if (yes) args.push("--force");
-  execFileSync(OPENCLAW, args, { stdio: "inherit" });
+  runOpenclaw(args, { stdio: "inherit" });
 }
 
 export interface PluginInspectResult {
@@ -294,7 +402,7 @@ export interface PluginsInspectOutcome {
  */
 export function pluginsInspectDetailed(id: string): PluginsInspectOutcome {
   try {
-    const out = execFileSync(OPENCLAW, ["plugins", "inspect", id, "--json"], {
+    const out = runOpenclaw(["plugins", "inspect", id, "--json"], {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -406,7 +514,7 @@ export function resolvePluginState(id: string): PluginResolvedState {
 
 export function gatewayStatus(): { running: boolean } {
   try {
-    const out = execFileSync(OPENCLAW, ["gateway", "status", "--json"], {
+    const out = runOpenclaw(["gateway", "status", "--json"], {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -433,7 +541,7 @@ export function gatewayStatus(): { running: boolean } {
 
 export function gatewayRestart(quiet?: boolean): boolean {
   try {
-    execFileSync(OPENCLAW, ["gateway", "restart"], {
+    runOpenclaw(["gateway", "restart"], {
       stdio: quiet ? ["pipe", "pipe", "pipe"] : "inherit",
     });
     return true;
@@ -448,14 +556,34 @@ export function gatewayRestart(quiet?: boolean): boolean {
 
 export function getOpenClawVersion(): string | null {
   try {
-    const out = execFileSync(OPENCLAW, ["--version"], {
+    const out = runOpenclaw(["--version"], {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
     });
     const match = out.match(/(\d{4}\.\d+\.\d+)/);
     return match?.[1] ?? null;
-  } catch {
+  } catch (err: any) {
+    if (err?.code === "ENOENT") {
+      return null;
+    }
+    console.error(`Failed to execute openclaw --version: ${err?.message ?? err}`);
     return null;
+  }
+}
+
+export function getOpenClawVersionStrict(): string | null {
+  try {
+    const out = runOpenclaw(["--version"], {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const match = out.match(/(\d{4}\.\d+\.\d+)/);
+    return match?.[1] ?? null;
+  } catch (err: any) {
+    if (err?.code === "ENOENT") {
+      return null;
+    }
+    throw new Error(`Failed to execute openclaw: ${err?.message ?? err}`);
   }
 }
 
@@ -515,7 +643,7 @@ export function restoreChannelConfigToFile(
  */
 export function getConfigFilePathSafe(): string {
   try {
-    return expandHome(getConfigFilePath());
+    return normalizeConfigPath(getConfigFilePath());
   } catch {
     return resolve(homedir(), ".openclaw", "openclaw.json");
   }
@@ -604,7 +732,7 @@ export function cleanupLegacyPlugin(): string[] {
   if (existsSync(legacyDir)) {
     // Try to uninstall via openclaw CLI first (removes entries/installs/allow)
     try {
-      execFileSync(OPENCLAW, ["plugins", "uninstall", LEGACY_PLUGIN_ID, "--force", "--keep-files"], {
+      runOpenclaw(["plugins", "uninstall", LEGACY_PLUGIN_ID, "--force", "--keep-files"], {
         stdio: ["pipe", "pipe", "pipe"],
       });
       actions.push(`Unregistered legacy plugin "${LEGACY_PLUGIN_ID}"`);
@@ -805,7 +933,7 @@ export function ensurePluginsAllow(): void {
 
 export function pluginsUpdateCompat(id: string, tag: string, quiet?: boolean): void {
   try {
-    const result = execFileSync(OPENCLAW, ["plugins", "update", id], {
+    const result = runOpenclaw(["plugins", "update", id], {
       stdio: ["pipe", "pipe", "pipe"],
       encoding: "utf-8",
     });

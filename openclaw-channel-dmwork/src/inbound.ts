@@ -22,6 +22,10 @@ import { mkdir, unlink, readdir, stat } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { randomUUID } from "node:crypto";
 
+// Pending inbound context for before_prompt_build hook injection.
+// handleInboundMessage writes here; the hook reads and clears per sessionKey.
+export const pendingInboundContext = new Map<string, { historyPrefix: string; memberListPrefix: string }>();
+
 // Defensive imports — these may not exist in older OpenClaw versions
 // History context managed manually for cross-SDK compatibility
 let clearHistoryEntriesIfEnabled: any;
@@ -195,8 +199,8 @@ export async function uploadAndSendMedia(params: {
       channelType,
       type: msgType,
       url: uploadedUrl,
-      name: isImage ? undefined : filename,
-      size: isImage ? undefined : fileSize,
+      name: filename,
+      size: fileSize,
       width,
       height,
     });
@@ -1383,12 +1387,14 @@ export async function handleInboundMessage(params: {
     sessionKey: route.sessionKey,
   });
 
-  // Inject member list for group messages to help LLM learn @[uid:name] format
+  // memberListPrefix and historyPrefix are injected via before_prompt_build hook
+  // (not persisted to session history). Only quotePrefix stays in Body.
   const memberListPrefix = isGroup ? buildMemberListPrefix(uidToNameMap) : "";
+  if (historyPrefix || memberListPrefix) {
+    pendingInboundContext.set(route.sessionKey, { historyPrefix, memberListPrefix });
+  }
 
-  const finalBody = (memberListPrefix || historyPrefix || quotePrefix)
-    ? (memberListPrefix + historyPrefix + quotePrefix + rawBody)
-    : rawBody;
+  const finalBody = quotePrefix ? (quotePrefix + rawBody) : rawBody;
 
   const body = core.channel.reply.formatAgentEnvelope({
     channel: "DMWork",
@@ -1399,10 +1405,8 @@ export async function handleInboundMessage(params: {
     body: finalBody,
   });
 
-  // Inject GROUP.md as GroupSystemPrompt for group messages
-  const groupSystemPrompt = isGroup && groupMdCache && message.channel_id
-    ? groupMdCache.get(extractParentGroupNo(message.channel_id))?.content
-    : undefined;
+  // GROUP.md injection is handled exclusively by the before_prompt_build hook
+  // (see index.ts → getGroupMdForPrompt) — no longer set here to avoid duplication.
 
   // Resolve sender display name — async fallback for DM users not in cache
   let senderName = resolveSenderName(message.from_uid, uidToNameMap);
@@ -1429,9 +1433,10 @@ export async function handleInboundMessage(params: {
 
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
-    BodyForAgent: body,  // ← 关键！AI 实际读取的是这个字段！
+    BodyForAgent: body,
     RawBody: rawBody,
     CommandBody: rawBody,
+    CommandAuthorized: true,
     MediaUrl: isFileMessage ? undefined : inboundMediaUrl,
     MediaUrls: (() => {
       // Only pass current message's local media path (no remote history URLs)
@@ -1452,7 +1457,7 @@ export async function handleInboundMessage(params: {
     MessageSid: String(message.message_id),
     Timestamp: message.timestamp ? message.timestamp * 1000 : undefined,
     GroupSubject: isGroup ? message.channel_id : undefined,
-    GroupSystemPrompt: groupSystemPrompt,
+    GroupSystemPrompt: undefined,
     Provider: "dmwork",
     Surface: "dmwork",
     OriginatingChannel: "dmwork",
@@ -1491,179 +1496,217 @@ export async function handleInboundMessage(params: {
     sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType }).catch(() => {});
   }, 5000);
 
-  try {
-  await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
-    ctx: ctxPayload,
-    cfg: config,
-    replyOptions: {},
-    dispatcherOptions: {
-      deliver: async (payload: {
-        text?: string;
-        mediaUrls?: string[];
-        mediaUrl?: string;
-        replyToId?: string | null;
-      }) => {
-        // Resolve outbound media URLs
-        const outboundMediaUrls = resolveOutboundMediaUrls(payload);
+  // Buffer text across streaming deliver calls; only send once after dispatcher finishes.
+  // Media is sent immediately (no edit problem); text is buffered (each call overwrites).
+  const deliverBuffer = {
+    lastText: null as string | null,
+    textSent: false,
+  };
+  const sentMediaUrls = new Set<string>();
 
-        // Upload and send each media file
-        for (const mediaUrl of outboundMediaUrls) {
+  // --- Shared helper: resolve mentions and send text ---
+  const resolveAndSendText = async (content: string) => {
+    let replyMentionUids: string[] = [];
+    let replyMentionEntities: MentionEntity[] = [];
+    let finalContent = content;
+
+    if (isGroup) {
+      const structuredMentions = parseStructuredMentions(content);
+
+      if (structuredMentions.length > 0) {
+        // v2 path: LLM used @[uid:name] format
+        const validUids = new Set(uidToNameMap.keys());
+        const converted = convertStructuredMentions(
+          content,
+          structuredMentions,
+          validUids,
+        );
+        finalContent = converted.content;
+        replyMentionEntities = [...converted.entities];
+
+        // Mixed scenario: check for remaining @name in converted content
+        const remaining = buildEntitiesFromFallback(finalContent, memberMap);
+        const existingOffsets = new Set(replyMentionEntities.map((e) => e.offset));
+        for (const rm of remaining.entities) {
+          if (!existingOffsets.has(rm.offset)) {
+            replyMentionEntities.push(rm);
+          }
+        }
+
+        log?.debug?.(
+          `dmwork: [REPLY] structured mentions: ${structuredMentions.length}, fallback: ${remaining.entities.length}`,
+        );
+      } else {
+        // v1 fallback path: LLM used @name format
+        const contentMentions = extractMentionMatches(content);
+
+        const unresolvedNames: { name: string; index: number }[] = [];
+
+        const resolveMention = (name: string): { uid: string | null; newContent: string } => {
+          const uid = findUidByName(name, memberMap);
+          let newContent = finalContent;
+
+          if (uid) {
+            return { uid, newContent };
+          } else if (/^[a-f0-9]{32}$/i.test(name)) {
+            const displayName = uidToNameMap.get(name);
+            if (displayName) {
+              newContent = newContent.replace(`@${name}`, `@${displayName}`);
+              return { uid: name, newContent };
+            }
+            return { uid: name, newContent };
+          } else if (/^[a-zA-Z0-9_]+$/.test(name)) {
+            const displayName = uidToNameMap.get(name);
+            if (displayName) {
+              newContent = newContent.replace(`@${name}`, `@${displayName}`);
+              return { uid: name, newContent };
+            }
+            return { uid: name, newContent };
+          }
+          return { uid: null, newContent };
+        };
+
+        const resolvedUids: (string | null)[] = [];
+        for (const mention of contentMentions) {
+          const name = mention.slice(1);
+          const result = resolveMention(name);
+          finalContent = result.newContent;
+          resolvedUids.push(result.uid);
+          if (!result.uid) {
+            unresolvedNames.push({ name, index: resolvedUids.length - 1 });
+          }
+        }
+
+        if (unresolvedNames.length > 0) {
+          log?.info?.(`dmwork: [REPLY] ${unresolvedNames.length} unresolved names, force refreshing cache...`);
+          const refreshed = await refreshGroupMemberCache({ sessionId: memberCacheGroupNo, memberMap, uidToNameMap, groupCacheTimestamps, apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", forceRefresh: true, log });
+          if (refreshed) {
+            for (const { name, index } of unresolvedNames) {
+              const uid = findUidByName(name, memberMap);
+              if (uid) {
+                resolvedUids[index] = uid;
+              }
+            }
+          }
+        }
+
+        replyMentionUids = resolvedUids.filter((uid): uid is string => uid !== null);
+        const fallbackResult = buildEntitiesFromFallback(finalContent, memberMap);
+        replyMentionEntities = fallbackResult.entities;
+      }
+
+      // Sort entities by offset and rebuild uids from sorted entities
+      if (replyMentionEntities.length > 0) {
+        replyMentionEntities.sort((a, b) => a.offset - b.offset);
+        replyMentionUids = replyMentionEntities.map((e) => e.uid);
+      }
+    }
+
+    // Detect @all/@所有人 in final content
+    const hasAtAll = /(?:^|(?<=\s))@(?:all|所有人)(?=\s|[^\w]|$)/i.test(finalContent);
+
+    await sendMessage({
+      apiUrl: account.config.apiUrl,
+      botToken: account.config.botToken ?? "",
+      channelId: replyChannelId,
+      channelType: replyChannelType,
+      content: finalContent,
+      ...(replyMentionUids.length > 0 ? { mentionUids: replyMentionUids } : {}),
+      ...(replyMentionEntities.length > 0 ? { mentionEntities: replyMentionEntities } : {}),
+      mentionAll: hasAtAll || undefined,
+    });
+    statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
+  };
+
+  try {
+    await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
+      ctx: ctxPayload,
+      cfg: config,
+      replyOptions: {},
+      dispatcherOptions: {
+        deliver: async (payload: {
+          text?: string;
+          mediaUrls?: string[];
+          mediaUrl?: string;
+          replyToId?: string | null;
+          isReasoning?: boolean;
+        }, info?: { kind?: string }) => {
+          // Skip reasoning blocks
+          if (payload.isReasoning) return;
+
+          const kind = info?.kind ?? "final";
+
+          // --- Media: send immediately (no edit/forward issue) with dedup ---
+          const outboundMediaUrls = resolveOutboundMediaUrls(payload);
+          for (const mediaUrl of outboundMediaUrls) {
+            if (sentMediaUrls.has(mediaUrl)) continue;
+            try {
+              await uploadAndSendMedia({
+                mediaUrl,
+                apiUrl: account.config.apiUrl,
+                botToken: account.config.botToken ?? "",
+                channelId: replyChannelId,
+                channelType: replyChannelType,
+                log,
+              });
+              sentMediaUrls.add(mediaUrl);
+            } catch (err) {
+              log?.error?.(`dmwork: media send failed for ${mediaUrl}: ${String(err)}`);
+            }
+          }
+
+          // --- Text handling based on kind ---
+          const content = payload.text?.trim() ?? "";
+          if (!content && outboundMediaUrls.length > 0) {
+            statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
+            return;
+          }
+          if (!content) return;
+
+          if (kind === "tool") {
+            // Verbose tool call output: send immediately
+            await resolveAndSendText(content);
+            log?.info?.(`dmwork: [deliver] tool text sent (${content.length} chars)`);
+            return;
+          }
+
+          // kind === "block" / "final" / anything else: buffer, send only once after dispatcher finishes
+          deliverBuffer.lastText = content;
+          log?.debug?.(`dmwork: [deliver-buffer] ${kind} text buffered (${content.length} chars)`);
+        },
+        onError: async (err: unknown, info: { kind: string }) => {
+          clearInterval(typingInterval);
+          log?.error?.(`dmwork ${info.kind} reply failed: ${String(err)}`);
+          // Prevent finally block from sending stale buffered text after error
+          deliverBuffer.lastText = null;
+          deliverBuffer.textSent = true;
           try {
-            await uploadAndSendMedia({
-              mediaUrl,
-              apiUrl: account.config.apiUrl,
-              botToken: account.config.botToken ?? "",
+            await sendMessage({
+              apiUrl,
+              botToken,
               channelId: replyChannelId,
               channelType: replyChannelType,
-              log,
+              content: "⚠️ 抱歉，处理您的消息时遇到了问题，请稍后重试。",
             });
-          } catch (err) {
-            log?.error?.(`dmwork: media send failed for ${mediaUrl}: ${String(err)}`);
+          } catch (sendErr) {
+            log?.error?.(`dmwork: failed to send error message: ${String(sendErr)}`);
           }
-        }
-
-        // If there are no media URLs, fall through to text logic; if there are, only send text if caption exists
-        const content = payload.text?.trim() ?? "";
-        if (!content && outboundMediaUrls.length > 0) {
-          statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
-          return;
-        }
-        if (!content) return;
-
-        // Build mentionUids + entities from @mentions in content
-        // Supports both @[uid:name] (v2 structured) and @name (v1 fallback)
-        let replyMentionUids: string[] = [];
-        let replyMentionEntities: MentionEntity[] = [];
-        let finalContent = content;
-
-        if (isGroup) {
-          const structuredMentions = parseStructuredMentions(content);
-
-          if (structuredMentions.length > 0) {
-            // v2 path: LLM used @[uid:name] format
-            const validUids = new Set(uidToNameMap.keys());
-            const converted = convertStructuredMentions(
-              content,
-              structuredMentions,
-              validUids,
-            );
-            finalContent = converted.content;
-            replyMentionEntities = [...converted.entities];
-
-            // Mixed scenario: check for remaining @name in converted content
-            const remaining = buildEntitiesFromFallback(finalContent, memberMap);
-            const existingOffsets = new Set(replyMentionEntities.map((e) => e.offset));
-            for (const rm of remaining.entities) {
-              if (!existingOffsets.has(rm.offset)) {
-                replyMentionEntities.push(rm);
-              }
-            }
-
-            log?.debug?.(
-              `dmwork: [REPLY] structured mentions: ${structuredMentions.length}, fallback: ${remaining.entities.length}`,
-            );
-          } else {
-            // v1 fallback path: LLM used @name format
-            // Keep existing resolveMention logic for hex uid / uid-format handling
-            const contentMentions = extractMentionMatches(content);
-
-            let unresolvedNames: { name: string; index: number }[] = [];
-
-            const resolveMention = (name: string): { uid: string | null; newContent: string } => {
-              let uid = findUidByName(name, memberMap);
-              let newContent = finalContent;
-
-              if (uid) {
-                return { uid, newContent };
-              } else if (/^[a-f0-9]{32}$/i.test(name)) {
-                const displayName = uidToNameMap.get(name);
-                if (displayName) {
-                  newContent = newContent.replace(`@${name}`, `@${displayName}`);
-                  return { uid: name, newContent };
-                }
-                return { uid: name, newContent };
-              } else if (/^[a-zA-Z0-9_]+$/.test(name)) {
-                const displayName = uidToNameMap.get(name);
-                if (displayName) {
-                  newContent = newContent.replace(`@${name}`, `@${displayName}`);
-                  return { uid: name, newContent };
-                }
-                return { uid: name, newContent };
-              }
-              return { uid: null, newContent };
-            };
-
-            const resolvedUids: (string | null)[] = [];
-            for (const mention of contentMentions) {
-              const name = mention.slice(1);
-              const result = resolveMention(name);
-              finalContent = result.newContent;
-              resolvedUids.push(result.uid);
-              if (!result.uid) {
-                unresolvedNames.push({ name, index: resolvedUids.length - 1 });
-              }
-            }
-
-            if (unresolvedNames.length > 0) {
-              log?.info?.(`dmwork: [REPLY] ${unresolvedNames.length} unresolved names, force refreshing cache...`);
-              const refreshed = await refreshGroupMemberCache({ sessionId: memberCacheGroupNo, memberMap, uidToNameMap, groupCacheTimestamps, apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", forceRefresh: true, log });
-              if (refreshed) {
-                for (const { name, index } of unresolvedNames) {
-                  const uid = findUidByName(name, memberMap);
-                  if (uid) {
-                    resolvedUids[index] = uid;
-                  }
-                }
-              }
-            }
-
-            replyMentionUids = resolvedUids.filter((uid): uid is string => uid !== null);
-            // Build entities from fallback for the final content
-            const fallbackResult = buildEntitiesFromFallback(finalContent, memberMap);
-            replyMentionEntities = fallbackResult.entities;
-          }
-
-          // Sort entities by offset and rebuild uids from sorted entities
-          if (replyMentionEntities.length > 0) {
-            replyMentionEntities.sort((a, b) => a.offset - b.offset);
-            replyMentionUids = replyMentionEntities.map((e) => e.uid);
-          }
-        }
-
-        // Detect @all/@所有人 in final content
-        const hasAtAll = /(?:^|(?<=\s))@(?:all|所有人)(?=\s|[^\w]|$)/i.test(finalContent);
-
-        await sendMessage({
-          apiUrl: account.config.apiUrl,
-          botToken: account.config.botToken ?? "",
-          channelId: replyChannelId,
-          channelType: replyChannelType,
-          content: finalContent,
-          ...(replyMentionUids.length > 0 ? { mentionUids: replyMentionUids } : {}),
-          ...(replyMentionEntities.length > 0 ? { mentionEntities: replyMentionEntities } : {}),
-          mentionAll: hasAtAll || undefined,
-        });
-
-        statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
+        },
       },
-      onError: async (err: unknown, info: { kind: string }) => {
-        clearInterval(typingInterval);
-        log?.error?.(`dmwork ${info.kind} reply failed: ${String(err)}`);
-        try {
-          await sendMessage({
-            apiUrl,
-            botToken,
-            channelId: replyChannelId,
-            channelType: replyChannelType,
-            content: "⚠️ 抱歉，处理您的消息时遇到了问题，请稍后重试。",
-          });
-        } catch (sendErr) {
-          log?.error?.(`dmwork: failed to send error message: ${String(sendErr)}`);
-        }
-      },
-    },
-  });
+    });
   } finally {
+    // --- Final send: deliver buffered text if only blocks arrived (no final/tool) ---
+    if (deliverBuffer.lastText && !deliverBuffer.textSent) {
+      deliverBuffer.textSent = true;
+      try {
+        await resolveAndSendText(deliverBuffer.lastText);
+        log?.info?.(`dmwork: [deliver-buffer] fallback text sent (${deliverBuffer.lastText.length} chars)`);
+      } catch (finalSendErr) {
+        log?.error?.(`dmwork: [deliver-buffer] final text send failed: ${String(finalSendErr)}`);
+      }
+    }
     clearInterval(typingInterval);
+    // Safety net: clean up pending inbound context in case the hook didn't fire
+    pendingInboundContext.delete(route.sessionKey);
   }
 }

@@ -3,7 +3,7 @@
  * These are used by inbound/outbound where the full DMWorkAPI class is not available.
  */
 
-import { ChannelType, MessageType, type MentionEntity } from "./types.js";
+import { ChannelType, MessageType, type MentionEntity, type SendMessageResult } from "./types.js";
 import path from "path";
 import { open } from "node:fs/promises";
 // @ts-ignore — cos-nodejs-sdk-v5 has incomplete TypeScript definitions
@@ -41,7 +41,11 @@ export async function postJson<T>(
   const text = await response.text();
   if (!text) return undefined;
   try {
-    return JSON.parse(text) as T;
+    // Protect int64 message_id from JSON.parse precision loss.
+    // Applied globally in postJson since only "message_id" fields are matched;
+    // the regex is conservative (16+ digits) to avoid any precision edge cases.
+    const safeText = text.replace(/"message_id"\s*:\s*(\d{16,})/g, '"message_id":"$1"');
+    return JSON.parse(safeText) as T;
   } catch {
     throw new Error(`DMWork API ${path} returned invalid JSON: ${text.slice(0, 200)}`);
   }
@@ -71,10 +75,12 @@ export async function sendMediaMessage(params: {
     url: params.url,
   };
 
-  // Image (type=2) needs width/height; File (type=8) needs name/size
+  // Image (type=2) needs width/height/name/size; File (type=8) needs name/size
   if (params.type === MessageType.Image) {
     if (params.width) payload.width = params.width;
     if (params.height) payload.height = params.height;
+    if (params.name) payload.name = params.name;
+    if (params.size != null) payload.size = params.size;
   } else {
     if (params.name) payload.name = params.name;
     if (params.size != null) payload.size = params.size;
@@ -187,6 +193,9 @@ export async function parseImageDimensionsFromFile(filePath: string, mime: strin
   return null;
 }
 
+// SendMessageResult: use the canonical definition from types.ts
+// (message_id is string due to int64 protection in postJson)
+
 export async function sendMessage(params: {
   apiUrl: string;
   botToken: string;
@@ -198,7 +207,7 @@ export async function sendMessage(params: {
   mentionAll?: boolean;
   replyMsgId?: string;
   signal?: AbortSignal;
-}): Promise<void> {
+}): Promise<SendMessageResult | undefined> {
   const payload: Record<string, unknown> = {
     type: MessageType.Text,
     content: params.content,
@@ -225,7 +234,7 @@ export async function sendMessage(params: {
   if (params.replyMsgId) {
     payload.reply = { message_id: params.replyMsgId };
   }
-  await postJson(params.apiUrl, params.botToken, "/v1/bot/sendMessage", {
+  return await postJson<SendMessageResult>(params.apiUrl, params.botToken, "/v1/bot/sendMessage", {
     channel_id: params.channelId,
     channel_type: params.channelType,
     payload,
@@ -836,27 +845,7 @@ export async function uploadFileToCOS(params: {
   });
 }
 
-/**
- * Edit a previously sent message (e.g. for progress updates).
- */
-export async function editMessage(params: {
-  apiUrl: string;
-  botToken: string;
-  messageId: string;
-  messageSeq: number;
-  channelId: string;
-  channelType: ChannelType;
-  contentEdit: string;
-  signal?: AbortSignal;
-}): Promise<void> {
-  await postJson(params.apiUrl, params.botToken, "/v1/bot/message/edit", {
-    message_id: params.messageId,
-    message_seq: params.messageSeq,
-    channel_id: params.channelId,
-    channel_type: params.channelType,
-    content_edit: params.contentEdit,
-  }, params.signal);
-}
+
 
 /**
  * Fetch user info by UID. Requires backend `/v1/bot/user/info` endpoint.

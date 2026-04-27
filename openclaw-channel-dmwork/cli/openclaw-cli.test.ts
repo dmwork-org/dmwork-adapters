@@ -101,13 +101,33 @@ describe("getOpenClawVersion", () => {
     expect(getOpenClawVersion()).toBe("2026.4.11");
   });
 
-  it("should return null when openclaw is not installed", async () => {
+  it("should return null when openclaw is not installed (ENOENT)", async () => {
     const { getOpenClawVersion } = await loadModule();
     mockExecFileSync.mockImplementation(() => {
-      throw new Error("ENOENT");
+      const err = new Error("spawn openclaw ENOENT") as any;
+      err.code = "ENOENT";
+      throw err;
     });
 
     expect(getOpenClawVersion()).toBeNull();
+  });
+
+  it("should return null on non-ENOENT errors (getOpenClawVersion)", async () => {
+    const { getOpenClawVersion } = await loadModule();
+    mockExecFileSync.mockImplementation(() => {
+      throw new Error("permission denied");
+    });
+
+    expect(getOpenClawVersion()).toBeNull();
+  });
+
+  it("should throw on non-ENOENT errors (getOpenClawVersionStrict)", async () => {
+    const { getOpenClawVersionStrict } = await loadModule();
+    mockExecFileSync.mockImplementation(() => {
+      throw new Error("permission denied");
+    });
+
+    expect(() => getOpenClawVersionStrict()).toThrow("Failed to execute openclaw");
   });
 });
 
@@ -150,18 +170,97 @@ describe("findGlobalOpenclaw (via module load)", () => {
   });
 
   it("should handle CRLF output from Windows", async () => {
-    const { execSync } = await import("node:child_process");
-    vi.mocked(execSync).mockReturnValue(
-      "C:\\npm\\_npx\\openclaw.cmd\r\nC:\\Program Files\\openclaw\\openclaw.exe\r\n",
-    );
-    const mod = await loadModule();
-    mockExecFileSync.mockReturnValue("test\n");
-    mod.configGet("test.path");
-    expect(mockExecFileSync).toHaveBeenCalledWith(
-      "C:\\Program Files\\openclaw\\openclaw.exe",
-      expect.any(Array),
-      expect.any(Object),
-    );
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const { execSync } = await import("node:child_process");
+      vi.mocked(execSync).mockReturnValue(
+        "C:\\npm\\_npx\\openclaw.cmd\r\nC:\\Program Files\\openclaw\\openclaw.exe\r\n",
+      );
+      const mod = await loadModule();
+      mockExecFileSync.mockReturnValue("test\n");
+      mod.configGet("test.path");
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        "C:\\Program Files\\openclaw\\openclaw.exe",
+        expect.any(Array),
+        expect.any(Object),
+      );
+    } finally {
+      Object.defineProperty(process, "platform", { value: originalPlatform });
+    }
+  });
+
+  it("should prefer .cmd when where returns both shim variants on Windows", async () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const { execSync } = await import("node:child_process");
+      vi.mocked(execSync).mockReturnValue(
+        "C:\\Users\\mLamp\\AppData\\Roaming\\npm\\openclaw\r\nC:\\Users\\mLamp\\AppData\\Roaming\\npm\\openclaw.cmd\r\n",
+      );
+      const mod = await loadModule();
+      mockExecFileSync.mockReturnValue("OpenClaw 2026.4.21\n");
+      mod.getOpenClawVersion();
+      // Windows .cmd files are executed via cmd.exe /d /s /c
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        expect.stringContaining("cmd.exe"),
+        expect.arrayContaining(["/d", "/v:off", "/c", "call"]),
+        expect.any(Object),
+      );
+    } finally {
+      Object.defineProperty(process, "platform", { value: originalPlatform });
+    }
+  });
+
+  it("should fallback to npm prefix when where openclaw fails on Windows", async () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const { execSync } = await import("node:child_process");
+      const { existsSync } = await import("node:fs");
+
+      vi.mocked(execSync).mockImplementation((cmd: string) => {
+        const cmdStr = String(cmd);
+        // where openclaw / where openclaw.exe → fail
+        if (cmdStr.includes("where") && cmdStr.includes("openclaw") && !cmdStr.includes("npm")) {
+          throw new Error("not found");
+        }
+        // where.exe npm → return npm.cmd (for resolveCommand)
+        if (cmdStr.includes("where") && cmdStr.includes("npm")) {
+          return "C:\\Users\\mLamp\\AppData\\Roaming\\npm\\npm.cmd\r\n";
+        }
+        return "";
+      });
+
+      mockExecFileSync.mockClear();
+      mockExecFileSync.mockImplementation((_cmd: unknown, args: unknown) => {
+        const argsArr = args as string[];
+        // cmd.exe /d /v:off /c call npm.cmd config get prefix
+        if (argsArr?.includes?.("prefix")) {
+          return "C:\\Users\\mLamp\\AppData\\Roaming\\npm\n";
+        }
+        // openclaw --version via cmd.exe
+        return "OpenClaw 2026.4.21\n";
+      });
+
+      vi.mocked(existsSync).mockImplementation((p: unknown) => {
+        return String(p).endsWith("openclaw.cmd");
+      });
+
+      const mod = await loadModule();
+      mod.getOpenClawVersion();
+
+      // Verify: openclaw.cmd found via npm prefix, executed via cmd.exe
+      const cmdExeCalls = mockExecFileSync.mock.calls.filter(
+        (call) => String(call[0]).includes("cmd.exe"),
+      );
+      expect(cmdExeCalls.length).toBeGreaterThanOrEqual(2); // npm prefix + openclaw --version
+      expect(cmdExeCalls.some(
+        (call) => (call[1] as string[]).some((a) => a.includes("openclaw.cmd")),
+      )).toBe(true);
+    } finally {
+      Object.defineProperty(process, "platform", { value: originalPlatform });
+    }
   });
 
   it("should fallback to candidate paths when which/where fails", async () => {
@@ -452,5 +551,56 @@ describe("resolvePluginState", () => {
     expect(state.installed).toBe(false);
     expect(state.version).toBeNull();
     expect(state.source).toBe("fallback");
+  });
+});
+
+describe("getConfigFilePathSafe (Windows relative path)", () => {
+  it("should resolve Windows relative path .\\.\\.openclaw\\openclaw.json to homedir", async () => {
+    vi.resetModules();
+    const mockExec = vi.fn();
+    // openclaw config file returns Windows relative path
+    mockExec.mockReturnValue(".\\.openclaw\\openclaw.json\n");
+    vi.doMock("node:child_process", () => ({
+      execFileSync: mockExec,
+      execSync: vi.fn().mockImplementation(() => { throw new Error("not found"); }),
+    }));
+    vi.doMock("node:fs", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("node:fs")>();
+      return {
+        ...actual,
+        existsSync: vi.fn().mockReturnValue(false),
+      };
+    });
+
+    const { getConfigFilePathSafe } = await import("./openclaw-cli.js");
+    const result = getConfigFilePathSafe();
+
+    // Should NOT contain literal ~ or relative .\ — must be resolved to absolute
+    expect(result).not.toContain("~");
+    expect(result).not.toMatch(/^\.\\/);
+    expect(result).toContain(".openclaw");
+    expect(result).toContain("openclaw.json");
+  });
+
+  it("should keep absolute paths unchanged", async () => {
+    vi.resetModules();
+    const mockExec = vi.fn();
+    mockExec.mockReturnValue("/home/user/.openclaw/openclaw.json\n");
+    vi.doMock("node:child_process", () => ({
+      execFileSync: mockExec,
+      execSync: vi.fn().mockImplementation(() => { throw new Error("not found"); }),
+    }));
+    vi.doMock("node:fs", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("node:fs")>();
+      return {
+        ...actual,
+        existsSync: vi.fn().mockReturnValue(false),
+      };
+    });
+
+    const { getConfigFilePathSafe } = await import("./openclaw-cli.js");
+    const result = getConfigFilePathSafe();
+
+    expect(result).toBe("/home/user/.openclaw/openclaw.json");
   });
 });
