@@ -234,3 +234,76 @@ def _try_longest_member_match(
                 if uid:
                     return {"name": candidate, "uid": uid}
     return None
+
+
+# ── Structured Mention (@[uid:name]) for outbound ────────────────────────────
+
+import re as _re
+
+STRUCTURED_MENTION_PATTERN = _re.compile(r"@\[([\w.\-]+):([^\]\n]+)\]")
+
+
+class StructuredMention:
+    """A parsed @[uid:name] mention."""
+    __slots__ = ("uid", "name", "offset", "length")
+
+    def __init__(self, uid: str, name: str, offset: int, length: int) -> None:
+        self.uid = uid
+        self.name = name
+        self.offset = offset
+        self.length = length
+
+
+class ConvertResult:
+    """Result of structured mention conversion."""
+    __slots__ = ("content", "entities", "uids")
+
+    def __init__(self, content: str, entities: list[MentionEntity], uids: list[str]) -> None:
+        self.content = content
+        self.entities = entities
+        self.uids = uids
+
+
+def parse_structured_mentions(text: str) -> list[StructuredMention]:
+    """Parse @[uid:name] mentions from text."""
+    results: list[StructuredMention] = []
+    for m in STRUCTURED_MENTION_PATTERN.finditer(text):
+        results.append(StructuredMention(
+            uid=m.group(1),
+            name=m.group(2),
+            offset=m.start(),
+            length=len(m.group(0)),
+        ))
+    return results
+
+
+def convert_structured_mentions(
+    text: str,
+    mentions: list[StructuredMention],
+    valid_uids: set[str],
+) -> ConvertResult:
+    """Convert @[uid:name] -> @name, building mention entities and uids."""
+    sorted_mentions = sorted(mentions, key=lambda m: m.offset)
+    entities: list[MentionEntity] = []
+    uids: list[str] = []
+    content = ""
+    cursor = 0
+
+    for m in sorted_mentions:
+        content += text[cursor:m.offset]
+        replacement = f"@{m.name}"
+        new_offset = len(content)
+        content += replacement
+
+        if m.uid in valid_uids:
+            entities.append(MentionEntity(
+                uid=m.uid,
+                offset=new_offset,
+                length=len(replacement),
+            ))
+            uids.append(m.uid)
+
+        cursor = m.offset + m.length
+
+    content += text[cursor:]
+    return ConvertResult(content=content, entities=entities, uids=uids)

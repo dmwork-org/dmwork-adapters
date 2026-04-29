@@ -27,7 +27,7 @@ import websockets
 import websockets.exceptions
 
 from hermes_dmwork import api
-from hermes_dmwork.mention import extract_mention_uids, convert_content_for_llm
+from hermes_dmwork.mention import extract_mention_uids, convert_content_for_llm, parse_structured_mentions, convert_structured_mentions
 from hermes_dmwork.protocol import (
     PROTO_VERSION,
     PacketType,
@@ -704,6 +704,12 @@ class DMWorkAdapter(BasePlatformAdapter):
 
         is_group = msg.channel_type == ChannelType.Group
 
+        # ── require_mention filter: skip group messages that don't @bot ──
+        if is_group and self._require_mention:
+            mention_uids = extract_mention_uids(payload.mention) if payload.mention else []
+            if self._robot_id not in mention_uids:
+                return
+
         # ── Handle GROUP.md events (Phase 3) ──
         event_type = None
         if payload.event and isinstance(payload.event, dict):
@@ -829,16 +835,17 @@ class DMWorkAdapter(BasePlatformAdapter):
                 reply_to_text=reply_text,
             )
 
+            # Always pass channel_type so send() can distinguish DM vs Group
+            event.raw_message = {
+                "channel_id": msg.channel_id if is_group else msg.from_uid,
+                "channel_type": msg.channel_type,
+            }
+
             # Inject GROUP.md as metadata
             if is_group and msg.channel_id:
                 group_md = self._group_md_cache.get(msg.channel_id)
                 if group_md and group_md.get("content"):
-                    # Store in raw_message for the gateway to pick up
-                    event.raw_message = {
-                        "group_system_prompt": group_md["content"],
-                        "channel_id": msg.channel_id,
-                        "channel_type": msg.channel_type,
-                    }
+                    event.raw_message["group_system_prompt"] = group_md["content"]
 
             # Dispatch to handler
             await self.handle_message(event)
@@ -1009,6 +1016,18 @@ class DMWorkAdapter(BasePlatformAdapter):
         if len(content) > self._stream_threshold and not (metadata and metadata.get("no_stream")):
             return await self._send_with_stream(chat_id, content, channel_type, reply_to)
 
+        # ── Process outbound @[uid:name] mentions ──
+        mention_uids = None
+        mention_entities = None
+        structured = parse_structured_mentions(content)
+        if structured:
+            valid_uids = {m.uid for m in structured}
+            conv_result = convert_structured_mentions(content, structured, valid_uids)
+            content = conv_result.content
+            if conv_result.entities:
+                mention_uids = conv_result.uids
+                mention_entities = conv_result.entities
+
         # Split long messages
         chunks = self.truncate_message(content, MAX_MESSAGE_LENGTH)
 
@@ -1022,6 +1041,8 @@ class DMWorkAdapter(BasePlatformAdapter):
                     channel_type=channel_type,
                     content=chunk,
                     reply_msg_id=reply_to,
+                    mention_uids=mention_uids,
+                    mention_entities=mention_entities,
                 )
             return SendResult(success=True)
         except Exception as e:
