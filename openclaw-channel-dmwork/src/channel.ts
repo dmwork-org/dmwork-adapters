@@ -1,9 +1,10 @@
-import {
-  DEFAULT_ACCOUNT_ID,
-  type ChannelOutboundContext,
-  type ChannelPlugin,
+import type {
+  ChannelPlugin,
+  OpenClawConfig,
+  ChannelMessageActionAdapter,
 } from "openclaw/plugin-sdk";
-import type { OpenClawConfig, ChannelMessageActionAdapter } from "openclaw/plugin-sdk";
+import type { ChannelOutboundContext } from "openclaw/plugin-sdk/channel-contract";
+import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
 import { DmworkConfigJsonSchema } from "./config-schema.js";
 import {
   listDmworkAccountIds,
@@ -30,7 +31,7 @@ import { buildEntitiesFromFallback, parseStructuredMentions, convertStructuredMe
 import type { MentionEntity } from "./types.js";
 import { handleDmworkMessageAction, parseTarget } from "./actions.js";
 import { createDmworkManagementTools } from "./agent-tools.js";
-import { getOrCreateGroupMdCache, registerBotGroupIds, getKnownGroupIds } from "./group-md.js";
+import { getOrCreateGroupMdCache, registerBotGroupIds, getKnownGroupIds, writeGroupMdToDisk } from "./group-md.js";
 import { registerOwnerUid } from "./owner-registry.js";
 import { preloadGroupMemberCache, getGroupMembersFromCache } from "./member-cache.js";
 import path from "node:path";
@@ -214,7 +215,7 @@ async function checkForUpdates(
 ): Promise<void> {
   try {
     // Check npm version
-    const localVersion = (await import("../package.json", { with: { type: "json" } })).default.version;
+    const localVersion = PLUGIN_VERSION;
     const resp = await fetch("https://registry.npmjs.org/openclaw-channel-dmwork/latest");
     if (resp.ok) {
       const data = await resp.json() as { version?: string };
@@ -424,8 +425,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         // v2 path: convert @[uid:name] → @name + entities
         const structuredMentions = parseStructuredMentions(finalContent);
         if (structuredMentions.length > 0) {
-          const validUids = new Set(uidToNameMap.keys());
-          const converted = convertStructuredMentions(finalContent, structuredMentions, validUids);
+          const converted = convertStructuredMentions(finalContent, structuredMentions);
           finalContent = converted.content;
           mentionEntities = [...converted.entities];
           for (const uid of converted.uids) {
@@ -602,6 +602,8 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
             url: cdnUrl,
             width: dims?.width,
             height: dims?.height,
+            name: filename,
+            size: fileSize,
           });
         } else {
           await sendMediaMessage({
@@ -724,6 +726,18 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
               const md = await getGroupMd({ apiUrl: account.config.apiUrl, botToken: account.config.botToken!, groupNo: g.group_no, log });
               if (md.content) {
                 groupMdCache.set(g.group_no, { content: md.content, version: md.version });
+                writeGroupMdToDisk({
+                  accountId: account.accountId,
+                  groupNo: g.group_no,
+                  content: md.content,
+                  meta: {
+                    version: md.version,
+                    updated_at: null,
+                    updated_by: "prefetch",
+                    fetched_at: new Date().toISOString(),
+                    account_id: account.accountId,
+                  },
+                });
                 mdCount++;
               }
             } catch {

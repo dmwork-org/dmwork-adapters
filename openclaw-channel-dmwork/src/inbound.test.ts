@@ -13,6 +13,9 @@ import {
   uploadAndSendMedia,
   downloadMediaToLocal,
   buildMemberListPrefix,
+  resolveCommandBody,
+  resolveCommandAuthorized,
+  pendingInboundContext,
   type ResolveFileResult,
 } from "./inbound.js";
 import { extractMentionUids } from "./mention-utils.js";
@@ -1065,5 +1068,93 @@ describe("resolveMultipleForwardText with URL resolution", () => {
     expect(result).toContain("Test: [图片]");
     expect(result).toContain("Test: [文件: doc.pdf]");
     expect(result).not.toContain("https://");
+  });
+});
+
+// ─── Slash command authorization & body resolution ───────────────────────────
+
+describe("resolveCommandBody", () => {
+  it("DM: keeps raw body as-is", () => {
+    expect(resolveCommandBody("/new", false, false)).toBe("/new");
+  });
+
+  it("group + explicit @bot: strips @mention prefix", () => {
+    expect(resolveCommandBody("@ona /new", true, true)).toBe("/new");
+  });
+
+  it("group + @all (not explicit bot mention): keeps raw body", () => {
+    expect(resolveCommandBody("@all /new", true, false)).toBe("@all /new");
+  });
+
+  it("group + no mention: keeps raw body", () => {
+    expect(resolveCommandBody("/new", true, false)).toBe("/new");
+  });
+});
+
+describe("resolveCommandAuthorized", () => {
+  it("DM: anyone can execute commands", () => {
+    expect(resolveCommandAuthorized(false, false, false)).toBe(true);
+    expect(resolveCommandAuthorized(false, true, false)).toBe(true);
+  });
+
+  it("group: owner + explicit @bot → authorized", () => {
+    expect(resolveCommandAuthorized(true, true, true)).toBe(true);
+  });
+
+  it("group: non-owner + explicit @bot → not authorized", () => {
+    expect(resolveCommandAuthorized(true, false, true)).toBe(false);
+  });
+
+  it("group: owner + @all (no explicit bot mention) → not authorized", () => {
+    expect(resolveCommandAuthorized(true, true, false)).toBe(false);
+  });
+
+  it("group: non-owner + no mention → not authorized", () => {
+    expect(resolveCommandAuthorized(true, false, false)).toBe(false);
+  });
+});
+
+describe("pendingInboundContext", () => {
+  beforeEach(() => {
+    pendingInboundContext.clear();
+  });
+
+  it("should store and retrieve context by sessionKey", () => {
+    const key = "dmwork:group:test123";
+    pendingInboundContext.set(key, {
+      historyPrefix: "history...",
+      memberListPrefix: "members...",
+    });
+    expect(pendingInboundContext.has(key)).toBe(true);
+    const entry = pendingInboundContext.get(key);
+    expect(entry?.historyPrefix).toBe("history...");
+    expect(entry?.memberListPrefix).toBe("members...");
+  });
+
+  it("should allow delete after read (consume-once pattern)", () => {
+    const key = "dmwork:group:consume";
+    pendingInboundContext.set(key, {
+      historyPrefix: "h",
+      memberListPrefix: "m",
+    });
+    const entry = pendingInboundContext.get(key);
+    pendingInboundContext.delete(key);
+    expect(entry).toBeDefined();
+    expect(pendingInboundContext.has(key)).toBe(false);
+  });
+
+  it("should keep separate entries for different sessionKeys", () => {
+    pendingInboundContext.set("key1", { historyPrefix: "h1", memberListPrefix: "" });
+    pendingInboundContext.set("key2", { historyPrefix: "", memberListPrefix: "m2" });
+    expect(pendingInboundContext.get("key1")?.historyPrefix).toBe("h1");
+    expect(pendingInboundContext.get("key2")?.memberListPrefix).toBe("m2");
+  });
+
+  it("should overwrite on repeated set for same key", () => {
+    const key = "dmwork:group:overwrite";
+    pendingInboundContext.set(key, { historyPrefix: "old", memberListPrefix: "" });
+    pendingInboundContext.set(key, { historyPrefix: "new", memberListPrefix: "ml" });
+    expect(pendingInboundContext.get(key)?.historyPrefix).toBe("new");
+    expect(pendingInboundContext.get(key)?.memberListPrefix).toBe("ml");
   });
 });

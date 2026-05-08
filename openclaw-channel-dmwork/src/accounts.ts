@@ -1,5 +1,5 @@
-import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk";
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
 import type { DmworkConfig } from "./config-schema.js";
 
 export type DmworkAccountConfig = DmworkConfig & {
@@ -19,6 +19,7 @@ export type ResolvedDmworkAccount = {
     pollIntervalMs: number;
     heartbeatIntervalMs: number;
     requireMention?: boolean;
+    ignoreMentionAll?: boolean;
     historyLimit?: number;  // 群聊历史消息条数限制
     historyPromptTemplate?: string;  // Template for group history context injection
   };
@@ -85,6 +86,7 @@ export function resolveDmworkAccount(params: {
       pollIntervalMs,
       heartbeatIntervalMs,
       requireMention: accountConfig.requireMention ?? channel.requireMention,
+      ignoreMentionAll: accountConfig.ignoreMentionAll ?? channel.ignoreMentionAll,
       historyLimit: accountConfig.historyLimit ?? channel.historyLimit ?? 20,
       historyPromptTemplate: accountConfig.historyPromptTemplate ?? channel.historyPromptTemplate,
     },
