@@ -90,4 +90,4 @@ If you used AI tools to help write the code:
 
 ## Security
 
-Do **not** open public issues for security vulnerabilities. Follow the process in [SECURITY.md](https://github.com/dmwork-org/dmworkim/blob/main/SECURITY.md).
+Do **not** open public issues for security vulnerabilities. Follow the process in [SECURITY.md](.github/SECURITY.md) and report via `security@mininglamp.com`.
