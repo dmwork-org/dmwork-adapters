@@ -122,7 +122,7 @@ export function createDmworkManagementTools(params: {
           groupId: {
             type: "string",
             description:
-              "The group_no (group ID). Required for group-info, group-members, group-md-read, group-md-update.",
+              "The group_no (group ID). Required for group-info, group-members, group-md-read, group-md-update, and all thread actions (create-thread, list-threads, get-thread, delete-thread, list-thread-members, join-thread, leave-thread, thread-md-read, thread-md-update).",
           },
           content: {
             type: "string",
