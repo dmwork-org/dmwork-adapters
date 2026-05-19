@@ -92,9 +92,10 @@ export async function uploadAndSendMedia(params: {
   botToken: string;
   channelId: string;
   channelType: ChannelType;
+  onBehalfOf?: string;
   log?: ChannelLogSink;
 }): Promise<void> {
-  const { mediaUrl, apiUrl, botToken, channelId, channelType, log } = params;
+  const { mediaUrl, apiUrl, botToken, channelId, channelType, onBehalfOf, log } = params;
 
   const { createReadStream: fsCreateReadStream, statSync: fsStatSync, createWriteStream: fsCreateWriteStream } = await import("node:fs");
   const { basename, join: pathJoin } = await import("node:path");
@@ -199,6 +200,7 @@ export async function uploadAndSendMedia(params: {
       size: fileSize,
       width,
       height,
+      ...(onBehalfOf ? { onBehalfOf } : {}),
     });
   } finally {
     if (tempPath) await fsUnlink(tempPath).catch(() => {});
@@ -1520,6 +1522,7 @@ export async function handleInboundMessage(params: {
               botToken: account.config.botToken ?? "",
               channelId: replyChannelId,
               channelType: replyChannelType,
+              ...(account.config.onBehalfOf ? { onBehalfOf: account.config.onBehalfOf } : {}),
               log,
             });
           } catch (err) {
@@ -1674,6 +1677,7 @@ export async function handleInboundMessage(params: {
           ...(replyMentionUids.length > 0 ? { mentionUids: replyMentionUids } : {}),
           ...(replyMentionEntities.length > 0 ? { mentionEntities: replyMentionEntities } : {}),
           mentionAll: hasAtAll || undefined,
+          ...(account.config.onBehalfOf ? { onBehalfOf: account.config.onBehalfOf } : {}),
         });
 
         // Save draft for subsequent edit-dedup
@@ -1699,6 +1703,7 @@ export async function handleInboundMessage(params: {
             channelId: replyChannelId,
             channelType: replyChannelType,
             content: "⚠️ 抱歉，处理您的消息时遇到了问题，请稍后重试。",
+            ...(account.config.onBehalfOf ? { onBehalfOf: account.config.onBehalfOf } : {}),
           });
         } catch (sendErr) {
           log?.error?.(`dmwork: failed to send error message: ${String(sendErr)}`);

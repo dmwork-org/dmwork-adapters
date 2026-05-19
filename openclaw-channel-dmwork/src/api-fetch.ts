@@ -68,6 +68,7 @@ export async function sendMediaMessage(params: {
   height?: number;
   mentionUids?: string[];
   mentionEntities?: MentionEntity[];
+  onBehalfOf?: string;
   signal?: AbortSignal;
 }): Promise<void> {
   const payload: Record<string, unknown> = {
@@ -102,6 +103,7 @@ export async function sendMediaMessage(params: {
   await postJson(params.apiUrl, params.botToken, "/v1/bot/sendMessage", {
     channel_id: params.channelId,
     channel_type: params.channelType,
+    ...(params.onBehalfOf ? { on_behalf_of: params.onBehalfOf } : {}),
     payload,
   }, params.signal);
 }
@@ -206,6 +208,7 @@ export async function sendMessage(params: {
   mentionEntities?: MentionEntity[];
   mentionAll?: boolean;
   replyMsgId?: string;
+  onBehalfOf?: string;
   signal?: AbortSignal;
 }): Promise<SendMessageResult | undefined> {
   const payload: Record<string, unknown> = {
@@ -237,6 +240,7 @@ export async function sendMessage(params: {
   return await postJson<SendMessageResult>(params.apiUrl, params.botToken, "/v1/bot/sendMessage", {
     channel_id: params.channelId,
     channel_type: params.channelType,
+    ...(params.onBehalfOf ? { on_behalf_of: params.onBehalfOf } : {}),
     payload,
   }, params.signal);
 }
